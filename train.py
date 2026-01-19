@@ -137,8 +137,6 @@ def add_dependency_and_validate_config(config):
     assert len(str(config.system.CUDA_VISIBLE_DEVICES).split(',')) == config.trainer.n_gpus_per_node, \
         f"CUDA_VISIBLE_DEVICES ({config.system.CUDA_VISIBLE_DEVICES}) must have the same number of GPUs as n_gpus_per_node ({config.trainer.n_gpus_per_node})"
     context_window_mode = getattr(config.agent_proxy, "context_window_mode", "full")
-    if context_window_mode in ("single_turn", "limited_multi_turn"):
-        # In these modes, each turn becomes a separate sample, so we need more samples
     rollout_filter_strategy = getattr(config.actor_rollout_ref.rollout, "rollout_filter_strategy", "top_p")
     rollout_filter_value = getattr(config.actor_rollout_ref.rollout, "rollout_filter_value", 0.25)
     
