@@ -567,6 +567,8 @@ class RayAgentTrainer(VerlRayPPOTrainer):
 
         import time
         self.start_time = time.time()
+        self.train_time_total = 0.0
+        self.eval_time_total = 0.0
         for step in range(self.total_training_steps):
             # metrics = {}
             timing_raw = {}
@@ -778,6 +780,15 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                     with marked_timer("save_checkpoint", timing_raw):
                         self._save_checkpoint()
 
+            eval_time = timing_raw.get("testing", 0.0)
+            save_time = timing_raw.get("save_checkpoint", 0.0)
+            step_time = timing_raw.get("step", 0.0)
+            train_time = step_time - eval_time - save_time
+            if train_time < 0:
+                train_time = 0.0
+            self.train_time_total += train_time
+            self.eval_time_total += eval_time
+
             # collect metrics
             metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
             metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
@@ -785,6 +796,12 @@ class RayAgentTrainer(VerlRayPPOTrainer):
             n_gpus = self.resource_pool_manager.get_n_gpus()
             metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
+            metrics.update({
+                "timing_s/train_step": train_time,
+                "timing_s/eval_step": eval_time,
+                "timing_s/train_total": self.train_time_total,
+                "timing_s/eval_total": self.eval_time_total,
+            })
             # add another timing metric: total time
             metrics.update({"timing_s/total": time.time() - self.start_time})
             # TODO: make a canonical logger that supports various backend
