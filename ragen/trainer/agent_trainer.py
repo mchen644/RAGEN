@@ -752,6 +752,15 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                         bi_level_gae=self.config.algorithm.bi_level_gae,
                     )
 
+                    # Apply filter loss scaling by scaling advantages
+                    # This avoids modifying the actor implementation in the submodule
+                    filter_loss_scaling = getattr(self.config.actor_rollout_ref.actor, "filter_loss_scaling", "none")
+                    filter_kept_ratio = batch.meta_info.get("filter_kept_ratio", 1.0)
+                    if filter_loss_scaling == "linear":
+                        batch.batch["advantages"] *= filter_kept_ratio
+                    elif filter_loss_scaling == "sqrt":
+                        batch.batch["advantages"] *= (filter_kept_ratio ** 0.5)
+
                 ##### A very different setting, just here for testing: Can I normalize the advantages to have a mean of 0?
                 if self.config.algorithm.adv_estimator == AdvantageEstimator.GRPO and self.config.grpo_advantage_length_weight:
                     response_mask = batch.batch["response_mask"]

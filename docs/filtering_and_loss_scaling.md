@@ -71,8 +71,13 @@ Controlled via `actor_rollout_ref.actor.filter_loss_scaling`:
     -   *Intuition*: A milder dampening than linear.
 
 ### Implementation Details
--   **Trainer**: The kept ratio is calculated in `ragen/trainer/agent_trainer.py` after the filtering step and stored in `batch.meta_info["filter_kept_ratio"]`.
--   **Actor**: In `verl/workers/actor/dp_actor.py`, the `update_policy` method retrieves this ratio and modifies `loss_scale_factor` before backpropagation.
+-   **Trainer**: The kept ratio is calculated in `ragen/trainer/agent_trainer.py`.
+-   **Loss Scaling**: The scaling is applied directly to the **advantages** in `ragen/trainer/agent_trainer.py` (after `compute_advantage`).
+    ```python
+    if filter_loss_scaling == "linear":
+        batch.batch["advantages"] *= filter_kept_ratio
+    ```
+    This effectively scales the policy gradient updates.
 
 ---
 
