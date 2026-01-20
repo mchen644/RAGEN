@@ -643,8 +643,6 @@ class ContextManager:
         for special_token in self.special_token_list:
             reasoning_text = reasoning_text.replace(special_token, "")
         reasoning_text = reasoning_text.strip()
-        if reasoning_text:
-            reasoning_text = f"{reasoning_text}</think>"
         reasoning_ids = self.tokenizer(reasoning_text, add_special_tokens=False)["input_ids"]
         return prompt_ids, reasoning_ids
 

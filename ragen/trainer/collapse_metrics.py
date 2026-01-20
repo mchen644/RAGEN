@@ -121,7 +121,7 @@ class CollapseDetector:
             )
 
             # Compute cross log probabilities
-            cross_log_probs = self._compute_cross_log_probs(
+            cross_log_probs, cross_log_probs_sum = self._compute_cross_log_probs(
                 batch,
                 actor_compute_log_prob_fn,
                 prompts,
@@ -134,10 +134,16 @@ class CollapseDetector:
             device = cross_log_probs.device
             col_ids = torch.tensor([gid_to_col[int(g)] for g in group_ids], device=device)
 
+            matched, marginal = self._compute_log_prob_stats(cross_log_probs, col_ids)
+            matched_sum, marginal_sum = self._compute_log_prob_stats(
+                cross_log_probs_sum, col_ids
+            )
+
             metrics = {}
-            metrics.update(self._compute_mi_estimate(cross_log_probs, col_ids))
+            metrics.update(self._compute_mi_estimate(matched, marginal, N_prompts))
+            metrics["collapse/mi_seq_estimate"] = (matched_sum - marginal_sum).mean().item()
             metrics.update(self._compute_retrieval_accuracy(cross_log_probs, col_ids, N_prompts))
-            metrics.update(self._compute_reasoning_entropy(cross_log_probs, col_ids))
+            metrics.update(self._compute_reasoning_entropy(matched, marginal, matched_sum, marginal_sum))
             return metrics
 
         except Exception as e:
@@ -187,6 +193,8 @@ class CollapseDetector:
             if torch.is_tensor(tokens):
                 lengths.append(tokens.numel())
             else:
+                if isinstance(tokens, np.ndarray) and tokens.dtype == object:
+                    tokens = tokens.tolist()
                 lengths.append(len(tokens))
         max_len = max(max(lengths, default=0), 1)
 
@@ -205,6 +213,8 @@ class CollapseDetector:
             if torch.is_tensor(tokens):
                 ids = tokens.to(device=device, dtype=torch.long)
             else:
+                if isinstance(tokens, np.ndarray) and tokens.dtype == object:
+                    tokens = tokens.tolist()
                 ids = torch.tensor(tokens, device=device, dtype=torch.long)
             if ids.numel() == 0:
                 continue
@@ -259,7 +269,7 @@ class CollapseDetector:
         unique_groups: np.ndarray,
         reasoning_ids: torch.Tensor,
         reasoning_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute cross log probabilities: ℓ_j(r_{i,k}) for all (i,k,j) pairs.
 
@@ -269,7 +279,8 @@ class CollapseDetector:
         3. Sum over reasoning tokens → ℓ_j(r_{i,k})
 
         Returns:
-            cross_log_probs: (NK, N) tensor - column j corresponds to unique_groups[j]
+            cross_log_probs: (NK, N) per-token mean log prob tensor
+            cross_log_probs_sum: (NK, N) per-sequence sum log prob tensor
         """
         NK = reasoning_ids.shape[0]
         N = len(unique_groups)
@@ -279,6 +290,7 @@ class CollapseDetector:
         reasoning_len = reasoning_ids.shape[1]
 
         cross_log_probs = torch.zeros(NK, N, device=device)
+        cross_log_probs_sum = torch.zeros(NK, N, device=device)
 
         for j, gid in enumerate(unique_groups):
             gid = int(gid)
@@ -338,15 +350,33 @@ class CollapseDetector:
 
             # Normalize by reasoning length to reduce length bias
             token_counts = mask.sum(dim=-1).clamp(min=1)
-            seq_log_probs = (log_probs * mask).sum(dim=-1) / token_counts  # (NK,)
+            seq_log_probs_sum = (log_probs * mask).sum(dim=-1)  # (NK,)
+            seq_log_probs = seq_log_probs_sum / token_counts  # (NK,)
             cross_log_probs[:, j] = seq_log_probs
+            cross_log_probs_sum[:, j] = seq_log_probs_sum
 
-        return cross_log_probs
+        return cross_log_probs, cross_log_probs_sum
 
-    def _compute_mi_estimate(
+    def _compute_log_prob_stats(
         self,
         cross_log_probs: torch.Tensor,
         col_ids: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute matched and marginal log-probabilities.
+        """
+        NK, N = cross_log_probs.shape
+        device = cross_log_probs.device
+
+        matched = cross_log_probs[torch.arange(NK, device=device), col_ids]
+        marginal = torch.logsumexp(cross_log_probs, dim=1) - math.log(N)
+        return matched, marginal
+
+    def _compute_mi_estimate(
+        self,
+        matched: torch.Tensor,
+        marginal: torch.Tensor,
+        N_prompts: int,
     ) -> Dict[str, float]:
         """
         Compute mutual information estimate.
@@ -354,28 +384,21 @@ class CollapseDetector:
         Î(X;R) = E[log p(r|x) - log p_mix(r)]
 
         Args:
-            cross_log_probs: (NK, N) tensor
-            col_ids: Column indices for each sample's true prompt
+            matched: log p(r|x) for matched prompt
+            marginal: log p_mix(r) under uniform prompt mixture
+            N_prompts: Number of unique prompts
         Returns:
             Dictionary of MI-related metrics
         """
-        NK, N = cross_log_probs.shape
-        device = cross_log_probs.device
-
-        # Matched: ℓ_i(r_{i,k}) - index by column, not group_id
-        matched = cross_log_probs[torch.arange(NK, device=device), col_ids]
-
-        # Marginal: log(1/N Σ exp(ℓ_j))
-        marginal = torch.logsumexp(cross_log_probs, dim=1) - math.log(N)
-
-        # MI estimate
-        mi = (matched - marginal).mean().item()
+        matched_mean = matched.mean().item()
+        marginal_mean = marginal.mean().item()
+        mi = matched_mean - marginal_mean
 
         return {
             "collapse/mi_estimate": mi,
-            "collapse/mi_upper_bound": math.log(N),  # Theoretical max
-            "collapse/matched_log_prob_mean": matched.mean().item(),
-            "collapse/marginal_log_prob_mean": marginal.mean().item(),
+            "collapse/mi_upper_bound": math.log(N_prompts),  # Theoretical max
+            "collapse/matched_log_prob_mean": matched_mean,
+            "collapse/marginal_log_prob_mean": marginal_mean,
         }
 
     def _compute_retrieval_accuracy(
@@ -412,16 +435,31 @@ class CollapseDetector:
             "collapse/retrieval_chance_level": chance_level,
             "collapse/retrieval_above_chance": accuracy - chance_level,
         }
-
+    
     def _compute_reasoning_entropy(
         self,
-        cross_log_probs: torch.Tensor,
-        col_ids: torch.Tensor,
+        matched: torch.Tensor,
+        marginal: torch.Tensor,
+        matched_sum: torch.Tensor,
+        marginal_sum: torch.Tensor,
     ) -> Dict[str, float]:
         """
         Estimate H(R|X) using the matched log-probabilities of the sampled reasoning.
+        And Estimate reasoning entropy H(R) = H(R|X) + I(X;R).
+        Per-token estimates are length-normalized; *_seq_est uses summed log probs.
         """
-        NK = cross_log_probs.shape[0]
-        device = cross_log_probs.device
-        matched = cross_log_probs[torch.arange(NK, device=device), col_ids]
-        return {"collapse/reasoning_entropy_est": (-matched.mean()).item()}
+        matched_mean = matched.mean().item()
+        marginal_mean = marginal.mean().item()
+        conditional_entropy = -matched_mean
+        mi_estimate = matched_mean - marginal_mean
+        reasoning_entropy = conditional_entropy + mi_estimate
+        matched_sum_mean = matched_sum.mean().item()
+        marginal_sum_mean = marginal_sum.mean().item()
+        conditional_entropy_seq = -matched_sum_mean
+        reasoning_entropy_seq = -marginal_sum_mean
+        return {
+            "collapse/conditional_entropy_est": conditional_entropy,
+            "collapse/reasoning_entropy_est": reasoning_entropy,
+            "collapse/conditional_entropy_seq_est": conditional_entropy_seq,
+            "collapse/reasoning_entropy_seq_est": reasoning_entropy_seq,
+        }
