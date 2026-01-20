@@ -453,12 +453,16 @@ class RayAgentTrainer(VerlRayPPOTrainer):
 
         # create collapse detector
         collapse_cfg = self.config.get("collapse_detection", {})
+        multi_turn_cfg = collapse_cfg.get("multi_turn_sampling", {})
         context_window_mode = getattr(self.config.agent_proxy, "context_window_mode", "full")
         self.collapse_detector = CollapseDetector(
             enabled=collapse_cfg.get("enabled", False),
             compute_freq=collapse_cfg.get("compute_freq", 10),
             micro_batch_size=collapse_cfg.get("micro_batch_size", 16),
             context_window_mode=context_window_mode,
+            multi_turn_enabled=multi_turn_cfg.get("enabled", True),
+            multi_turn_strategy=multi_turn_cfg.get("strategy", "turn_uniform"),
+            num_samples=multi_turn_cfg.get("num_samples"),
         )
 
 

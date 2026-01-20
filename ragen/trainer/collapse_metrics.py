@@ -12,7 +12,7 @@ not the true p(x). This is exactly what's needed for diagnosing template collaps
 from __future__ import annotations
 
 import math
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -36,6 +36,9 @@ class CollapseDetector:
         compute_freq: int = 10,
         micro_batch_size: int = 16,
         context_window_mode: str = "full",
+        multi_turn_enabled: bool = True,
+        multi_turn_strategy: str = "turn_uniform",
+        num_samples: Optional[int] = None,
     ):
         """
         Initialize the collapse detector.
@@ -45,11 +48,17 @@ class CollapseDetector:
             compute_freq: Compute metrics every N steps
             micro_batch_size: Micro batch size for cross-scoring
             context_window_mode: Context window mode ("full", "single_turn", "limited_multi_turn")
+            multi_turn_enabled: Whether to use multi-turn sampling for MI computation
+            multi_turn_strategy: Sampling strategy ("turn_uniform" or "trajectory_uniform")
+            num_samples: Number of (x,r) pairs to sample (None = use all)
         """
         self.enabled = enabled
         self.compute_freq = compute_freq
         self.micro_batch_size = micro_batch_size
         self.context_window_mode = context_window_mode
+        self.multi_turn_enabled = multi_turn_enabled
+        self.multi_turn_strategy = multi_turn_strategy
+        self.num_samples = num_samples
 
     def compute_collapse_metrics(
         self,
@@ -88,15 +97,40 @@ class CollapseDetector:
             group_ids = np.array(group_ids)
 
         if batch.non_tensor_batch is None:
-            raise ValueError("Collapse metrics require non_tensor_batch with first_turn_prompt_ids/reasoning_ids.")
-        prompt_ids_list = batch.non_tensor_batch.get("first_turn_prompt_ids")
-        reasoning_ids_list = batch.non_tensor_batch.get("first_turn_reasoning_ids")
-        if prompt_ids_list is None or reasoning_ids_list is None:
-            raise ValueError("Collapse metrics require first_turn_prompt_ids and first_turn_reasoning_ids.")
-        if isinstance(prompt_ids_list, np.ndarray):
-            prompt_ids_list = list(prompt_ids_list)
-        if isinstance(reasoning_ids_list, np.ndarray):
-            reasoning_ids_list = list(reasoning_ids_list)
+            raise ValueError("Collapse metrics require non_tensor_batch with prompt/reasoning data.")
+
+        # Check for multi-turn data
+        all_turns_prompt_ids = batch.non_tensor_batch.get("all_turns_prompt_ids")
+        all_turns_reasoning_ids = batch.non_tensor_batch.get("all_turns_reasoning_ids")
+        turn_counts = batch.non_tensor_batch.get("turn_counts")
+
+        # Use multi-turn sampling if enabled and data is available
+        if (
+            self.multi_turn_enabled
+            and all_turns_prompt_ids is not None
+            and all_turns_reasoning_ids is not None
+            and turn_counts is not None
+        ):
+            prompt_ids_list, reasoning_ids_list, group_ids = self._sample_multi_turn_pairs(
+                all_turns_prompt_ids,
+                all_turns_reasoning_ids,
+                turn_counts,
+                group_ids,
+            )
+            if len(prompt_ids_list) == 0:
+                return {}
+            # Multi-turn: each (prompt, reasoning) pair is unique, so use per-sample groups.
+            group_ids = np.arange(len(prompt_ids_list), dtype=int)
+        else:
+            # Fallback to first_turn mode
+            prompt_ids_list = batch.non_tensor_batch.get("first_turn_prompt_ids")
+            reasoning_ids_list = batch.non_tensor_batch.get("first_turn_reasoning_ids")
+            if prompt_ids_list is None or reasoning_ids_list is None:
+                raise ValueError("Collapse metrics require first_turn_prompt_ids and first_turn_reasoning_ids.")
+            if isinstance(prompt_ids_list, np.ndarray):
+                prompt_ids_list = list(prompt_ids_list)
+            if isinstance(reasoning_ids_list, np.ndarray):
+                reasoning_ids_list = list(reasoning_ids_list)
 
         # Build mapping from group_id to column index
         unique_groups = np.unique(group_ids)
@@ -463,3 +497,124 @@ class CollapseDetector:
             "collapse/conditional_entropy_seq_est": conditional_entropy_seq,
             "collapse/reasoning_entropy_seq_est": reasoning_entropy_seq,
         }
+
+    def _sample_multi_turn_pairs(
+        self,
+        all_turns_prompt_ids: np.ndarray,
+        all_turns_reasoning_ids: np.ndarray,
+        turn_counts: np.ndarray,
+        group_ids: np.ndarray,
+    ) -> Tuple[List, List, np.ndarray]:
+        """
+        Sample (x, r) pairs from multi-turn data based on the configured strategy.
+
+        Args:
+            all_turns_prompt_ids: shape (M,), each element is a list of prompt_ids per turn
+            all_turns_reasoning_ids: shape (M,), each element is a list of reasoning_ids per turn
+            turn_counts: shape (M,), number of valid turns per trajectory
+            group_ids: shape (M,), group_id for each trajectory
+
+        Returns:
+            (sampled_prompt_ids, sampled_reasoning_ids, sampled_group_ids)
+        """
+        if self.multi_turn_strategy == "turn_uniform":
+            return self._sample_turn_uniform(
+                all_turns_prompt_ids, all_turns_reasoning_ids, turn_counts, group_ids
+            )
+        elif self.multi_turn_strategy == "trajectory_uniform":
+            return self._sample_trajectory_uniform(
+                all_turns_prompt_ids, all_turns_reasoning_ids, turn_counts, group_ids
+            )
+        else:
+            raise ValueError(f"Unknown sampling strategy: {self.multi_turn_strategy}")
+
+    def _sample_turn_uniform(
+        self,
+        all_turns_prompt_ids: np.ndarray,
+        all_turns_reasoning_ids: np.ndarray,
+        turn_counts: np.ndarray,
+        group_ids: np.ndarray,
+    ) -> Tuple[List, List, np.ndarray]:
+        """
+        Turn-uniform sampling: uniform over all (trajectory, turn) pairs.
+        Pr(m, t) = 1 / Σ_m T_m
+        Longer trajectories contribute more samples.
+        """
+        # Expand all (trajectory_idx, turn_idx) pairs
+        all_pairs = []
+        for m, T_m in enumerate(turn_counts):
+            for t in range(T_m):
+                all_pairs.append((m, t))
+
+        total_pairs = len(all_pairs)
+        if total_pairs == 0:
+            return [], [], np.array([], dtype=int)
+
+        # Sample if num_samples is specified and smaller than total
+        if self.num_samples is not None and self.num_samples < total_pairs:
+            indices = np.random.choice(total_pairs, self.num_samples, replace=False)
+            selected_pairs = [all_pairs[i] for i in indices]
+        else:
+            selected_pairs = all_pairs
+
+        return self._extract_pairs(
+            selected_pairs, all_turns_prompt_ids, all_turns_reasoning_ids, group_ids
+        )
+
+    def _sample_trajectory_uniform(
+        self,
+        all_turns_prompt_ids: np.ndarray,
+        all_turns_reasoning_ids: np.ndarray,
+        turn_counts: np.ndarray,
+        group_ids: np.ndarray,
+    ) -> Tuple[List, List, np.ndarray]:
+        """
+        Trajectory-uniform sampling: first uniform over trajectories, then uniform over turns.
+        Pr(m, t) = 1/M · 1/T_m
+        Each trajectory has equal weight regardless of length.
+        """
+        M = len(turn_counts)
+        if M == 0:
+            return [], [], np.array([], dtype=int)
+
+        # Determine number of samples
+        total_pairs = sum(turn_counts)
+        if self.num_samples is None:
+            num_to_sample = total_pairs
+        else:
+            num_to_sample = min(self.num_samples, total_pairs)
+
+        # Sample: first pick trajectory uniformly, then pick turn uniformly within
+        selected_pairs = []
+        for _ in range(num_to_sample):
+            m = np.random.randint(M)
+            if turn_counts[m] > 0:
+                t = np.random.randint(turn_counts[m])
+                selected_pairs.append((m, t))
+
+        return self._extract_pairs(
+            selected_pairs, all_turns_prompt_ids, all_turns_reasoning_ids, group_ids
+        )
+
+    def _extract_pairs(
+        self,
+        pairs: List[Tuple[int, int]],
+        all_turns_prompt_ids: np.ndarray,
+        all_turns_reasoning_ids: np.ndarray,
+        group_ids: np.ndarray,
+    ) -> Tuple[List, List, np.ndarray]:
+        """
+        Extract prompt_ids and reasoning_ids for the selected (trajectory, turn) pairs.
+        """
+        sampled_prompt_ids = []
+        sampled_reasoning_ids = []
+        sampled_group_ids = []
+
+        for m, t in pairs:
+            prompt_ids = all_turns_prompt_ids[m][t]
+            reasoning_ids = all_turns_reasoning_ids[m][t]
+            sampled_prompt_ids.append(prompt_ids)
+            sampled_reasoning_ids.append(reasoning_ids)
+            sampled_group_ids.append(group_ids[m])
+
+        return sampled_prompt_ids, sampled_reasoning_ids, np.array(sampled_group_ids, dtype=int)

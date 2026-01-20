@@ -646,6 +646,110 @@ class ContextManager:
         reasoning_ids = self.tokenizer(reasoning_text, add_special_tokens=False)["input_ids"]
         return prompt_ids, reasoning_ids
 
+    def _build_turn_prompt_and_reasoning_ids(
+        self,
+        env_output: Dict,
+        history: List[Dict],
+        turn_idx: int,
+    ) -> Tuple[List[int], List[int]]:
+        """
+        Build prompt_ids and reasoning_ids for a specific turn.
+
+        Args:
+            env_output: Environment output dictionary
+            history: Complete history list
+            turn_idx: Target turn index (0-based)
+
+        Returns:
+            (prompt_ids, reasoning_ids):
+            - prompt_ids: All context tokens before generating this turn's reasoning
+            - reasoning_ids: This turn's reasoning tokens (from <think> tag)
+        """
+        if turn_idx >= len(history):
+            return [], []
+
+        # Build messages up to turn_idx (including the user message for turn_idx)
+        messages = [
+            {"role": "system", "content": self._build_system_content(env_output["env_id"])},
+            {"role": "user", "content": ""},
+        ]
+
+        for idx in range(turn_idx + 1):
+            content = history[idx]
+            actual_turn = idx + 1
+
+            # Add state to user message
+            if "state" in content:
+                messages[-1]["content"] += self._build_turn_state_content(
+                    content, actual_turn, env_output["env_id"]
+                )
+
+            # For turns before turn_idx, add complete assistant response and reward
+            if idx < turn_idx:
+                if "llm_response" in content:
+                    messages.append({"role": "assistant", "content": content["llm_response"]})
+                if "reward" in content:
+                    messages.append({"role": "user", "content": f"Reward:\n{content['reward']}\n"})
+
+        # Build prompt text (everything before the reasoning)
+        prompt_text = self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, tokenize=False
+        )
+        if self.config.agent_proxy.enable_think:
+            prompt_text += "<think>"
+        prompt_ids = self.tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+
+        # Extract reasoning from the target turn
+        reasoning_text = ""
+        if self.config.agent_proxy.enable_think:
+            target_turn = history[turn_idx]
+            if "llm_response" in target_turn:
+                match = re.search(r"<think>(.*?)</think>", target_turn["llm_response"], re.DOTALL)
+                if match:
+                    reasoning_text = match.group(1)
+
+        # Clean special tokens
+        for special_token in self.special_token_list:
+            reasoning_text = reasoning_text.replace(special_token, "")
+        reasoning_text = reasoning_text.strip()
+        reasoning_ids = self.tokenizer(reasoning_text, add_special_tokens=False)["input_ids"]
+
+        return prompt_ids, reasoning_ids
+
+    def _build_all_turns_prompt_and_reasoning_ids(
+        self,
+        env_output: Dict,
+        history: List[Dict],
+    ) -> Tuple[List[List[int]], List[List[int]]]:
+        """
+        Build prompt_ids and reasoning_ids for all turns with valid llm_response.
+
+        Returns:
+            (all_prompt_ids, all_reasoning_ids):
+            - all_prompt_ids: List of prompt_ids for each turn
+            - all_reasoning_ids: List of reasoning_ids for each turn
+        """
+        all_prompt_ids = []
+        all_reasoning_ids = []
+
+        for turn_idx, turn in enumerate(history):
+            # Only include turns with llm_response (valid reasoning)
+            if "llm_response" not in turn:
+                continue
+
+            prompt_ids, reasoning_ids = self._build_turn_prompt_and_reasoning_ids(
+                env_output, history, turn_idx
+            )
+
+            # Skip turns with empty reasoning
+            if not reasoning_ids:
+                continue
+
+            all_prompt_ids.append(prompt_ids)
+            all_reasoning_ids.append(reasoning_ids)
+
+        return all_prompt_ids, all_reasoning_ids
+
     # ==================== Mask Computation ====================
 
     def _compute_loss_mask(
@@ -978,6 +1082,10 @@ class ContextManager:
         messages_list = []
         first_turn_prompt_ids_list = []
         first_turn_reasoning_ids_list = []
+        # Multi-turn data for collapse detection
+        all_turns_prompt_ids_list = []
+        all_turns_reasoning_ids_list = []
+        turn_counts_list = []
 
         for env_output in env_outputs:
             history = self._extract_history(env_output, prepare_for_update=True)
@@ -986,6 +1094,14 @@ class ContextManager:
             )
             first_turn_prompt_ids_list.append(first_prompt_ids)
             first_turn_reasoning_ids_list.append(first_reasoning_ids)
+
+            # Build multi-turn prompt/reasoning for collapse detection
+            all_prompt_ids, all_reasoning_ids = self._build_all_turns_prompt_and_reasoning_ids(
+                env_output, history
+            )
+            all_turns_prompt_ids_list.append(all_prompt_ids)
+            all_turns_reasoning_ids_list.append(all_reasoning_ids)
+            turn_counts_list.append(len(all_prompt_ids))
             messages = [
                 {"role": "system", "content": self._build_system_content(env_output["env_id"])},
                 {"role": "user", "content": ""}
@@ -1044,6 +1160,10 @@ class ContextManager:
             "messages_list": np.array(messages_list, dtype=object),
             "first_turn_prompt_ids": np.array(first_turn_prompt_ids_list, dtype=object),
             "first_turn_reasoning_ids": np.array(first_turn_reasoning_ids_list, dtype=object),
+            # Multi-turn data for collapse detection
+            "all_turns_prompt_ids": np.array(all_turns_prompt_ids_list, dtype=object),
+            "all_turns_reasoning_ids": np.array(all_turns_reasoning_ids_list, dtype=object),
+            "turn_counts": np.array(turn_counts_list, dtype=int),
         }
 
         llm_inputs.meta_info = {"metrics": self._compute_metrics(env_outputs, response_length)}
