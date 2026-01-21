@@ -461,7 +461,6 @@ class RayAgentTrainer(VerlRayPPOTrainer):
             micro_batch_size=collapse_cfg.get("micro_batch_size", 16),
             context_window_mode=context_window_mode,
             multi_turn_enabled=multi_turn_cfg.get("enabled", True),
-            multi_turn_strategy=multi_turn_cfg.get("strategy", "turn_uniform"),
             num_samples=multi_turn_cfg.get("num_samples"),
         )
 

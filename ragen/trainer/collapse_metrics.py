@@ -37,7 +37,6 @@ class CollapseDetector:
         micro_batch_size: int = 16,
         context_window_mode: str = "full",
         multi_turn_enabled: bool = True,
-        multi_turn_strategy: str = "turn_uniform",
         num_samples: Optional[int] = None,
     ):
         """
@@ -49,7 +48,6 @@ class CollapseDetector:
             micro_batch_size: Micro batch size for cross-scoring
             context_window_mode: Context window mode ("full", "single_turn", "limited_multi_turn")
             multi_turn_enabled: Whether to use multi-turn sampling for MI computation
-            multi_turn_strategy: Sampling strategy ("turn_uniform" or "trajectory_uniform")
             num_samples: Number of (x,r) pairs to sample (None = use all)
         """
         self.enabled = enabled
@@ -57,7 +55,6 @@ class CollapseDetector:
         self.micro_batch_size = micro_batch_size
         self.context_window_mode = context_window_mode
         self.multi_turn_enabled = multi_turn_enabled
-        self.multi_turn_strategy = multi_turn_strategy
         self.num_samples = num_samples
 
     def compute_collapse_metrics(
@@ -104,34 +101,90 @@ class CollapseDetector:
         all_turns_reasoning_ids = batch.non_tensor_batch.get("all_turns_reasoning_ids")
         turn_counts = batch.non_tensor_batch.get("turn_counts")
 
-        # Use multi-turn sampling if enabled and data is available
+        metrics: Dict[str, float] = {}
+
+        def _safe_compute(label: str, prompt_ids_list: List, reasoning_ids_list: List, sample_group_ids: np.ndarray) -> None:
+            if len(prompt_ids_list) == 0:
+                return
+            try:
+                sample_metrics = self._compute_metrics_for_pairs(
+                    batch,
+                    actor_compute_log_prob_fn,
+                    prompt_ids_list,
+                    reasoning_ids_list,
+                    sample_group_ids,
+                )
+                metrics.update(self._prefix_metrics(sample_metrics, label))
+            except Exception as e:
+                print(f"[CollapseDetector] Error computing {label} metrics: {e}")
+
+        # Multi-turn sampling: compute both strategies when enabled.
         if (
             self.multi_turn_enabled
             and all_turns_prompt_ids is not None
             and all_turns_reasoning_ids is not None
             and turn_counts is not None
         ):
-            prompt_ids_list, reasoning_ids_list, group_ids = self._sample_multi_turn_pairs(
+            turn_prompt_ids, turn_reasoning_ids, _ = self._sample_turn_uniform(
                 all_turns_prompt_ids,
                 all_turns_reasoning_ids,
                 turn_counts,
                 group_ids,
             )
-            if len(prompt_ids_list) == 0:
-                return {}
-            # Multi-turn: each (prompt, reasoning) pair is unique, so use per-sample groups.
-            group_ids = np.arange(len(prompt_ids_list), dtype=int)
-        else:
-            # Fallback to first_turn mode
-            prompt_ids_list = batch.non_tensor_batch.get("first_turn_prompt_ids")
-            reasoning_ids_list = batch.non_tensor_batch.get("first_turn_reasoning_ids")
-            if prompt_ids_list is None or reasoning_ids_list is None:
-                raise ValueError("Collapse metrics require first_turn_prompt_ids and first_turn_reasoning_ids.")
-            if isinstance(prompt_ids_list, np.ndarray):
-                prompt_ids_list = list(prompt_ids_list)
-            if isinstance(reasoning_ids_list, np.ndarray):
-                reasoning_ids_list = list(reasoning_ids_list)
+            turn_group_ids = np.arange(len(turn_prompt_ids), dtype=int)
+            _safe_compute(
+                "collapse_turn_sample",
+                turn_prompt_ids,
+                turn_reasoning_ids,
+                turn_group_ids,
+            )
 
+            traj_prompt_ids, traj_reasoning_ids, _ = self._sample_trajectory_uniform(
+                all_turns_prompt_ids,
+                all_turns_reasoning_ids,
+                turn_counts,
+                group_ids,
+            )
+            traj_group_ids = np.arange(len(traj_prompt_ids), dtype=int)
+            _safe_compute(
+                "collapse_trajectory_sample",
+                traj_prompt_ids,
+                traj_reasoning_ids,
+                traj_group_ids,
+            )
+
+        # First-turn sampling: always compute when data is available.
+        first_turn_prompt_ids = batch.non_tensor_batch.get("first_turn_prompt_ids")
+        first_turn_reasoning_ids = batch.non_tensor_batch.get("first_turn_reasoning_ids")
+        if first_turn_prompt_ids is None or first_turn_reasoning_ids is None:
+            if not metrics:
+                raise ValueError(
+                    "Collapse metrics require first_turn_prompt_ids and first_turn_reasoning_ids."
+                )
+            return metrics
+
+        first_prompt_ids, first_reasoning_ids, first_group_ids = self._sample_first_turn_pairs(
+            first_turn_prompt_ids,
+            first_turn_reasoning_ids,
+            group_ids,
+        )
+        _safe_compute(
+            "collapse_first_turn_sample",
+            first_prompt_ids,
+            first_reasoning_ids,
+            first_group_ids,
+        )
+
+        return metrics
+
+    def _compute_metrics_for_pairs(
+        self,
+        batch: DataProto,
+        actor_compute_log_prob_fn: Callable[[DataProto], DataProto],
+        prompt_ids_list: List,
+        reasoning_ids_list: List,
+        group_ids: np.ndarray,
+    ) -> Dict[str, float]:
         # Build mapping from group_id to column index
         unique_groups = np.unique(group_ids)
         gid_to_col = {int(gid): j for j, gid in enumerate(unique_groups)}
@@ -141,48 +194,55 @@ class CollapseDetector:
             # Need at least 2 prompts to compute meaningful metrics
             return {}
 
-        try:
-            # Extract representative prompts for each group
-            prompts = self._extract_representative_prompts(
-                group_ids,
-                gid_to_col,
-                prompt_ids_list,
-            )
+        # Extract representative prompts for each group
+        prompts = self._extract_representative_prompts(
+            group_ids,
+            gid_to_col,
+            prompt_ids_list,
+        )
 
-            pad_token_id = self._get_pad_token_id(batch)
-            reasoning_ids, reasoning_mask = self._build_padded_token_batch(
-                reasoning_ids_list, pad_token_id, batch.batch["input_ids"].device
-            )
+        pad_token_id = self._get_pad_token_id(batch)
+        reasoning_ids, reasoning_mask = self._build_padded_token_batch(
+            reasoning_ids_list, pad_token_id, batch.batch["input_ids"].device
+        )
 
-            # Compute cross log probabilities
-            cross_log_probs, cross_log_probs_sum = self._compute_cross_log_probs(
-                batch,
-                actor_compute_log_prob_fn,
-                prompts,
-                unique_groups,
-                reasoning_ids,
-                reasoning_mask,
-            )
+        # Compute cross log probabilities
+        cross_log_probs, cross_log_probs_sum = self._compute_cross_log_probs(
+            batch,
+            actor_compute_log_prob_fn,
+            prompts,
+            unique_groups,
+            reasoning_ids,
+            reasoning_mask,
+        )
 
-            # Convert group_ids to column indices
-            device = cross_log_probs.device
-            col_ids = torch.tensor([gid_to_col[int(g)] for g in group_ids], device=device)
+        # Convert group_ids to column indices
+        device = cross_log_probs.device
+        col_ids = torch.tensor([gid_to_col[int(g)] for g in group_ids], device=device)
 
-            matched, marginal = self._compute_log_prob_stats(cross_log_probs, col_ids)
-            matched_sum, marginal_sum = self._compute_log_prob_stats(
-                cross_log_probs_sum, col_ids
-            )
+        matched, marginal = self._compute_log_prob_stats(cross_log_probs, col_ids)
+        matched_sum, marginal_sum = self._compute_log_prob_stats(
+            cross_log_probs_sum, col_ids
+        )
 
-            metrics = {}
-            metrics.update(self._compute_mi_estimate(matched, marginal, N_prompts))
-            metrics["collapse/mi_seq_estimate"] = (matched_sum - marginal_sum).mean().item()
-            metrics.update(self._compute_retrieval_accuracy(cross_log_probs, col_ids, N_prompts))
-            metrics.update(self._compute_reasoning_entropy(matched, marginal, matched_sum, marginal_sum))
-            return metrics
+        metrics: Dict[str, float] = {}
+        metrics.update(self._compute_mi_estimate(matched, marginal, N_prompts))
+        metrics["collapse/mi_seq_estimate"] = (matched_sum - marginal_sum).mean().item()
+        metrics.update(self._compute_retrieval_accuracy(cross_log_probs, col_ids, N_prompts))
+        metrics.update(
+            self._compute_reasoning_entropy(matched, marginal, matched_sum, marginal_sum)
+        )
+        return metrics
 
-        except Exception as e:
-            print(f"[CollapseDetector] Error computing collapse metrics: {e}")
-            return {}
+    def _prefix_metrics(self, metrics: Dict[str, float], prefix: str) -> Dict[str, float]:
+        prefixed = {}
+        for key, value in metrics.items():
+            if key.startswith("collapse/"):
+                metric_name = key.split("/", 1)[1]
+                prefixed[f"{prefix}/{metric_name}"] = value
+            else:
+                prefixed[f"{prefix}/{key}"] = value
+        return prefixed
 
     def _apply_mask(self, batch: DataProto, mask: np.ndarray) -> DataProto:
         """Apply a boolean mask to filter the batch."""
@@ -370,7 +430,7 @@ class CollapseDetector:
 
             cross_batch = DataProto(
                 batch=cross_batch_data,
-                non_tensor_batch=batch.non_tensor_batch,
+                non_tensor_batch={},
                 meta_info=batch.meta_info.copy() if batch.meta_info else {},
             )
 
@@ -485,8 +545,7 @@ class CollapseDetector:
         matched_mean = matched.mean().item()
         marginal_mean = marginal.mean().item()
         conditional_entropy = -matched_mean
-        mi_estimate = matched_mean - marginal_mean
-        reasoning_entropy = conditional_entropy + mi_estimate
+        reasoning_entropy = -marginal_mean
         matched_sum_mean = matched_sum.mean().item()
         marginal_sum_mean = marginal_sum.mean().item()
         conditional_entropy_seq = -matched_sum_mean
@@ -498,35 +557,33 @@ class CollapseDetector:
             "collapse/reasoning_entropy_seq_est": reasoning_entropy_seq,
         }
 
-    def _sample_multi_turn_pairs(
+    def _sample_first_turn_pairs(
         self,
-        all_turns_prompt_ids: np.ndarray,
-        all_turns_reasoning_ids: np.ndarray,
-        turn_counts: np.ndarray,
+        first_turn_prompt_ids: np.ndarray,
+        first_turn_reasoning_ids: np.ndarray,
         group_ids: np.ndarray,
     ) -> Tuple[List, List, np.ndarray]:
         """
-        Sample (x, r) pairs from multi-turn data based on the configured strategy.
-
-        Args:
-            all_turns_prompt_ids: shape (M,), each element is a list of prompt_ids per turn
-            all_turns_reasoning_ids: shape (M,), each element is a list of reasoning_ids per turn
-            turn_counts: shape (M,), number of valid turns per trajectory
-            group_ids: shape (M,), group_id for each trajectory
-
-        Returns:
-            (sampled_prompt_ids, sampled_reasoning_ids, sampled_group_ids)
+        Sample (x, r) pairs from first-turn data with uniform sampling.
         """
-        if self.multi_turn_strategy == "turn_uniform":
-            return self._sample_turn_uniform(
-                all_turns_prompt_ids, all_turns_reasoning_ids, turn_counts, group_ids
-            )
-        elif self.multi_turn_strategy == "trajectory_uniform":
-            return self._sample_trajectory_uniform(
-                all_turns_prompt_ids, all_turns_reasoning_ids, turn_counts, group_ids
-            )
+        if isinstance(first_turn_prompt_ids, np.ndarray):
+            first_turn_prompt_ids = list(first_turn_prompt_ids)
+        if isinstance(first_turn_reasoning_ids, np.ndarray):
+            first_turn_reasoning_ids = list(first_turn_reasoning_ids)
+
+        total_pairs = len(first_turn_prompt_ids)
+        if total_pairs == 0:
+            return [], [], np.array([], dtype=int)
+
+        if self.num_samples is not None and self.num_samples < total_pairs:
+            indices = np.random.choice(total_pairs, self.num_samples, replace=False)
         else:
-            raise ValueError(f"Unknown sampling strategy: {self.multi_turn_strategy}")
+            indices = np.arange(total_pairs)
+
+        sampled_prompt_ids = [first_turn_prompt_ids[i] for i in indices]
+        sampled_reasoning_ids = [first_turn_reasoning_ids[i] for i in indices]
+        sampled_group_ids = group_ids[indices]
+        return sampled_prompt_ids, sampled_reasoning_ids, sampled_group_ids
 
     def _sample_turn_uniform(
         self,
