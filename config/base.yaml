@@ -1,5 +1,5 @@
 defaults:
-  - ppo_trainer # this is a symbolic link to the verl/verl/trainer/config/ppo_trainer.yaml file
+  - ppo_trainer
   - envs
 
 system:
@@ -45,6 +45,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: ${micro_batch_size_per_gpu} # following micro_batch_size_per_gpu
   rollout:
     name: vllm
+    load_format: auto  # load from huggingface instead of dummy (random init)
     log_prob_micro_batch_size_per_gpu: ${micro_batch_size_per_gpu} # following micro_batch_size_per_gpu
     tensor_model_parallel_size: 1
     max_model_len: 3600
@@ -102,7 +103,7 @@ trainer:
   val_before_train: True
   n_gpus_per_node: 1
   test_freq: 10
-  generations_to_log_to_wandb: 
+  generations_to_log_to_wandb:
     val: 20
   logger: [ 'console', 'wandb' ]
   max_actor_ckpt_to_keep: 1
@@ -121,6 +122,14 @@ agent_proxy:
     grouping: "state" # state / batch / inductive
     method: "identity" # asym_clip / identity / mean_std
 
+# Collapse detection for diagnosing template collapse vs entropy collapse
+collapse_detection:
+  compute_freq: 5  # Compute every N steps
+  micro_batch_size: 128  # Micro batch size for cross-scoring
+  first_turn_enabled: true  # Compute first-turn metrics
+  multi_turn_enabled: true  # Enable multi-turn sampling for MI computation
+  num_samples: 64  # N or all
+
 es_manager:
   format_penalty: -0.1
   train:
@@ -132,7 +141,8 @@ es_manager:
       n_groups: [8] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
   val:
     env_groups: 512
-    group_size: 16 # should be set to 1 because when val temperature is set to 0 and group size > 1, there will be repetitive prompts which leads to same trajectory.
+    group_size: 1 # should be set to 1 because when val temperature is set to 0 and group size > 1, there will be repetitive prompts which leads to same trajectory.
+
     env_configs:
       tags: ["CoordSokoban"]
       n_groups: [512] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
