@@ -122,7 +122,6 @@ main() {
 
     # installing webshop
     print_step "Installing webshop dependencies..."
-    conda install -c pytorch faiss-cpu -y
     sudo apt update
     sudo apt install default-jdk -y
     conda install -c conda-forge openjdk=21 maven -y

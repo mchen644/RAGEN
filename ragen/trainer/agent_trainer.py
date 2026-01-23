@@ -443,12 +443,14 @@ class RayAgentTrainer(VerlRayPPOTrainer):
         rollout_cfg = self.config.actor_rollout_ref.rollout
         rollout_metric = getattr(rollout_cfg, "rollout_filter_metric", "reward_variance")
         self.rollout_filter = build_rollout_filter(
-            ratio=rollout_cfg.rollout_filter_ratio,
+            value=getattr(rollout_cfg, "rollout_filter_value", getattr(rollout_cfg, "rollout_filter_ratio", 0.25)),
             filter_type=rollout_cfg.rollout_filter_type,
             num_groups=self.config.es_manager.train.env_groups,
             group_size=self.config.es_manager.train.group_size,
             metric=rollout_metric,
             compute_log_prob=self.actor_rollout_wg.compute_log_prob,
+            include_zero=getattr(rollout_cfg, "rollout_filter_include_zero", True),
+            strategy=getattr(rollout_cfg, "rollout_filter_strategy", "top_p"),
         )
 
         # create collapse detector
@@ -614,48 +616,73 @@ class RayAgentTrainer(VerlRayPPOTrainer):
 
             with marked_timer("step", timing_raw):
                 # generate a batch
-                with marked_timer("gen", timing_raw):
-                    batch.meta_info = batch.meta_info or {}
-                    batch.meta_info["compute_collapse"] = self.collapse_detector.should_compute(
-                        self.global_steps
-                    )
-                    batch = self.agent_proxy.rollout(batch, val=False)
+                attempts = 0
+                max_attempts = 10
+                batch = None
+                
+                while attempts < max_attempts:
+                    attempts += 1
+                    with marked_timer("gen", timing_raw):
+                        batch = DataProto()
+                        batch.meta_info = batch.meta_info or {}
+                        batch.meta_info["compute_collapse"] = self.collapse_detector.should_compute(
+                            self.global_steps
+                        )
+                        batch = self.agent_proxy.rollout(batch, val=False)
 
-                metrics = {}
+                    metrics = {}
 
-                # Compute collapse detection metrics before filtering (for fair comparison)
-                with marked_timer("collapse_metrics", timing_raw, color="cyan"):
-                    collapse_metrics = self.collapse_detector.compute_collapse_metrics(
-                        batch=batch,
-                        actor_compute_log_prob_fn=self.actor_rollout_wg.compute_log_prob,
-                        global_step=self.global_steps,
-                    )
-                    metrics.update(collapse_metrics)
+                    # Compute collapse detection metrics before filtering (for fair comparison)
+                    with marked_timer("collapse_metrics", timing_raw, color="cyan"):
+                        collapse_metrics = self.collapse_detector.compute_collapse_metrics(
+                            batch=batch,
+                            actor_compute_log_prob_fn=self.actor_rollout_wg.compute_log_prob,
+                            global_step=self.global_steps,
+                        )
+                        metrics.update(collapse_metrics)
 
-                with marked_timer("filter", timing_raw):
-                    # Filter first, then adjust batch size
-                    batch, filter_metrics = self.rollout_filter.filter(batch)
-                    metrics.update(filter_metrics)
+                    with marked_timer("filter", timing_raw):
+                        # Filter first, then adjust batch size
+                        batch, filter_metrics = self.rollout_filter.filter(batch)
+                        metrics.update(filter_metrics)
+                        
+                        # Add kept ratio to meta_info for loss scaling
+                        if "rollout/filter_kept_ratio" in metrics:
+                            batch.meta_info["filter_kept_ratio"] = metrics["rollout/filter_kept_ratio"]
+                        else:
+                            batch.meta_info["filter_kept_ratio"] = 1.0
 
-                    # Adjust batch size to be divisible by num_groups, ppo_mini_batch_size, and n_gpus
-                    num_groups = self.config.es_manager.train.env_groups
-                    ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-                    n_gpus = self.config.trainer.n_gpus_per_node
-                    size_divisor = np.lcm.reduce([num_groups, ppo_mini_batch_size, n_gpus])
-                    adjust_mode = getattr(self.config.agent_proxy, "batch_adjust_mode", "copy")
-                    batch = adjust_batch(batch, size_divisor, mode=adjust_mode)
 
-                    # Record batch and mini-batch statistics
-                    batch_size = batch.batch["input_ids"].shape[0]
-                    num_mini_batches = batch_size // ppo_mini_batch_size
-                    metrics.update({
-                        "train/batch_size": batch_size,
-                        "train/num_mini_batches": num_mini_batches,
-                    })
-                    metrics.update({"train/" + key: value for key, value in batch.meta_info["metrics"].items()})
+                        
+                        if len(batch) > 0:
+                            break
+                        else:
+                            print(f"[Warning] Attempt {attempts}/{max_attempts}: all samples filtered out. Retrying rollout...")
 
-                    inputs, outputs, scores = _process_batch_for_logging(batch)
-                    # self._maybe_log_generations(inputs=inputs, outputs=outputs, scores=scores, _type="train")
+                if len(batch) == 0:
+                    # print(f"[Error] Failed to find any valid samples after {max_attempts} attempts. Skipping this training step.")
+                    raise ValueError("Failed to find any valid samples after {} attempts".format(max_attempts))
+
+                # Adjust batch size to be divisible by num_groups, ppo_mini_batch_size, and n_gpus
+                num_groups = self.config.es_manager.train.env_groups
+                ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+                n_gpus = self.config.trainer.n_gpus_per_node
+                size_divisor = np.lcm.reduce([num_groups, ppo_mini_batch_size, n_gpus])
+                adjust_mode = getattr(self.config.agent_proxy, "batch_adjust_mode", "copy")
+                batch = adjust_batch(batch, size_divisor, mode=adjust_mode)
+
+                # Record batch and mini-batch statistics
+                batch_size = batch.batch["input_ids"].shape[0]
+                num_mini_batches = batch_size // ppo_mini_batch_size
+                metrics.update({
+                    "train/batch_size": batch_size,
+                    "train/num_mini_batches": num_mini_batches,
+                    "train/rollout_attempts": attempts
+                })
+                metrics.update({"train/" + key: value for key, value in batch.meta_info["metrics"].items()})
+
+                inputs, outputs, scores = _process_batch_for_logging(batch)
+                # self._maybe_log_generations(inputs=inputs, outputs=outputs, scores=scores, _type="train")
 
                 if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                     # TODO: check if this is correct. Not tested yer
@@ -780,6 +807,15 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                         high_level_gamma=self.config.algorithm.high_level_gamma,
                         bi_level_gae=self.config.algorithm.bi_level_gae,
                     )
+
+                    # Apply filter loss scaling by scaling advantages
+                    # This avoids modifying the actor implementation in the submodule
+                    filter_loss_scaling = getattr(self.config.actor_rollout_ref.actor, "filter_loss_scaling", "none")
+                    filter_kept_ratio = batch.meta_info.get("filter_kept_ratio", 1.0)
+                    if filter_loss_scaling == "linear":
+                        batch.batch["advantages"] *= filter_kept_ratio
+                    elif filter_loss_scaling == "sqrt":
+                        batch.batch["advantages"] *= (filter_kept_ratio ** 0.5)
 
                 ##### A very different setting, just here for testing: Can I normalize the advantages to have a mean of 0?
                 if self.config.algorithm.adv_estimator == AdvantageEstimator.GRPO and self.config.grpo_advantage_length_weight:

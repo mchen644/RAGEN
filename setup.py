@@ -13,7 +13,7 @@ base_requires = [
     "codetiming",
     "datasets",
     "dill",
-    "flash-attn==2.7.4.post1",
+    # "flash-attn==2.7.4.post1",
     "hydra-core",
     "numpy",
     "pandas",

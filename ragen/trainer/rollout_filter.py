@@ -15,11 +15,13 @@ from verl import DataProto
 class RolloutFilterConfig:
     """Configuration container for rollout filtering."""
 
-    ratio: float
+    value: float
     filter_type: str
     group_size: int
     num_groups: int
     metric: str = "reward_variance"
+    include_zero: bool = True
+    strategy: str = "top_p"
 
 
 class RolloutFilter:
@@ -32,8 +34,12 @@ class RolloutFilter:
         raise NotImplementedError
 
     @property
-    def ratio(self) -> float:
-        return self.config.ratio
+    def value(self) -> float:
+        return self.config.value
+
+    @property
+    def strategy(self) -> str:
+        return self.config.strategy
 
     @property
     def filter_type(self) -> str:
@@ -48,20 +54,86 @@ class RolloutFilter:
         return self.config.num_groups
 
     def _select_top_groups(self, scores: torch.Tensor) -> torch.Tensor:
-        rollout_filter_ratio = self.ratio
-        if rollout_filter_ratio >= 1:
-            return torch.arange(self.num_groups, device=scores.device)
+        # Convert to float for safety with epsilon
+        scores = scores.float()
+        indices = torch.arange(self.num_groups, device=scores.device)
 
-        k = max(int(rollout_filter_ratio * self.num_groups), 1)
+        # Handle zero exclusion
+        if not self.config.include_zero:
+            non_zero_mask = (torch.abs(scores) > 1e-10)
+            scores = scores[non_zero_mask]
+            indices = indices[non_zero_mask]
+            
+            if indices.numel() == 0:
+                return torch.tensor([], dtype=torch.long, device=scores.device)
 
-        if self.filter_type == "smallest":
-            top_groups = (-scores).topk(k).indices
-        elif self.filter_type == "largest":
-            top_groups = scores.topk(k).indices
+        # Regular ratio logic
+
+        # Regular ratio logic
+        # Strategy dispatch
+        if self.strategy == "top_p":
+            if self.value >= 1.0:
+                return indices
+
+            # Nucleus Sampling (Cumulative Probability)
+            # 1. Determine logits for softmax
+            if self.filter_type == "largest":
+                logits = scores
+            elif self.filter_type == "smallest":
+                logits = -scores
+            else:
+                raise ValueError(f"Invalid rollout filter type: {self.filter_type}")
+
+            # 2. Compute probabilities
+            probs = torch.softmax(logits, dim=0)
+
+            # 3. Sort probabilities in descending order
+            sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+
+            # 4. Compute cumulative sum
+            cumulative_probs = torch.cumsum(sorted_probs, dim=0)
+
+            # 5. Cutoff at P (self.value)
+            # Select elements where cumulative probability is <= P, plus the first one that exceeds it
+            # To do this, we find the first index where cumulative_probs > P
+            cutoff_index = torch.searchsorted(cumulative_probs, self.value).item()
+            
+            # Ensure we select at least one
+            k = cutoff_index + 1
+            k = min(k, indices.numel())
+            
+            # Select the top k indices from the sorted order
+            top_groups_local_indices = sorted_indices[:k]
+            return indices[top_groups_local_indices]
+
+        elif self.strategy == "top_k":
+            k = int(self.config.value)
+            k = min(k, indices.numel())
+            k = max(k, 1) # Ensure at least 1
+            
+            if self.filter_type == "smallest":
+                top_groups_local_indices = (-scores).topk(k).indices
+            elif self.filter_type == "largest":
+                top_groups_local_indices = scores.topk(k).indices
+            else:
+                raise ValueError(f"Invalid rollout filter type: {self.filter_type}")
+            
+            return indices[top_groups_local_indices]
+
+        elif self.strategy == "min_p":
+            # min-p: take all groups > max_score * value
+            max_score = scores.max()
+            threshold = max_score * self.config.value
+            
+            # Note: This logic assumes 'largest' semantics generally for min_p thresholding
+            # If strictly following 'smallest', we might want < min_score / value? 
+            # But keeping previous behavior: selection based on score magnitude relative to max.
+            
+            mask = scores > threshold
+            return indices[mask]
+            
         else:
-            raise ValueError(f"Invalid rollout filter type: {self.filter_type}")
-
-        return top_groups
+             raise ValueError(f"Unknown strategy: {self.strategy}")
 
     def _groups_to_mask(self, top_groups: torch.Tensor, group_size: int = None) -> torch.Tensor:
         device = top_groups.device
@@ -130,7 +202,6 @@ class RewardRolloutFilter(RolloutFilter):
         return in_group_std
 
     def filter(self, batch: DataProto) -> Tuple[DataProto, Dict[str, torch.Tensor]]:
-        rollout_filter_ratio = self.ratio
         num_groups = self.num_groups
 
         # Check if this is turn-level mode (single_turn/limited_multi_turn, indicated by episode_ids)
@@ -194,10 +265,13 @@ class RewardRolloutFilter(RolloutFilter):
                 "rollout/chosen_in_group_reward_std": in_group_std[top_groups].mean(),
                 "rollout/chosen_in_group_reward_max": in_group_max[top_groups].mean(),
                 "rollout/chosen_in_group_reward_mean": in_group_mean[top_groups].mean(),
+                "rollout/filter_kept_count": torch.tensor(float(top_groups.numel())),
+                "rollout/filter_kept_ratio": torch.tensor(top_groups.numel() / self.num_groups),
+                "rollout/filter_zero_count": (torch.abs(selection_scores) <= 1e-10).sum(),
             }
         )
 
-        if rollout_filter_ratio >= 1:
+        if self.strategy == "top_p" and self.config.value >= 1 and self.config.include_zero:
             return batch, metrics
 
         if has_episode_ids:
@@ -248,7 +322,6 @@ class EntropyRolloutFilter(RolloutFilter):
         return in_group_std
 
     def filter(self, batch: DataProto) -> Tuple[DataProto, Dict[str, torch.Tensor]]:
-        rollout_filter_ratio = self.ratio
         num_groups = self.num_groups
 
         if "entropys" not in batch.batch:
@@ -324,10 +397,13 @@ class EntropyRolloutFilter(RolloutFilter):
                 "rollout/chosen_in_group_entropy_std": in_group_std[top_groups].mean(),
                 "rollout/chosen_in_group_entropy_max": in_group_max[top_groups].mean(),
                 "rollout/chosen_in_group_entropy_mean": in_group_mean[top_groups].mean(),
+                "rollout/filter_kept_count": torch.tensor(float(top_groups.numel())),
+                "rollout/filter_kept_ratio": torch.tensor(top_groups.numel() / self.num_groups),
+                "rollout/filter_zero_count": (torch.abs(selection_scores) <= 1e-10).sum(),
             }
         )
 
-        if rollout_filter_ratio >= 1:
+        if self.strategy == "top_p" and self.config.value >= 1 and self.config.include_zero:
             return batch, metrics
 
         if has_episode_ids:
@@ -358,12 +434,14 @@ EntropyVarianceRolloutFilter = EntropyRolloutFilter
 
 
 def build_rollout_filter(
-    ratio: float,
+    value: float,
     filter_type: str,
     num_groups: int,
     group_size: int,
     metric: Optional[str],
     compute_log_prob: Optional[Callable[[DataProto], DataProto]] = None,
+    include_zero: bool = True,
+    strategy: str = "top_p",
 ) -> RolloutFilter:
     metric = (metric or "reward_variance").lower()
     metric = {
@@ -372,11 +450,13 @@ def build_rollout_filter(
     }.get(metric, metric)
 
     config = RolloutFilterConfig(
-        ratio=ratio,
+        value=value,
         filter_type=filter_type,
         num_groups=num_groups,
         group_size=group_size,
         metric=metric,
+        include_zero=include_zero,
+        strategy=strategy,
     )
 
     if metric in {"reward", "reward_variance"}:
