@@ -4,7 +4,7 @@ set -euo pipefail
 # usage: bash run_filtering_multigpu.sh [grpo|ppo|all] [reward_variance|entropy|entropy_variance]
 ALGO="${1:-grpo}" # default to grpo
 METRIC="${2:-reward_variance}" # default to reward_variance
-DATE=$(date +%m%d)
+EXP_NAME="final0123"
 
 # -----------------------
 # GPU autodetect + CUDA_VISIBLE_DEVICES
@@ -139,7 +139,7 @@ run_exps_for_algo() {
                 for scale_str in "${LOSS_SCALES[@]}"; do
                     read -r scaling scale_suffix <<< "$scale_str"
 
-                    EXP_NAME="soko_3b_${alg_name}_${stra_suffix}_${type_suffix}_${inc_suffix}_${scale_suffix}"
+                    EXP_NAME="${EXP_NAME}_soko_3b_${alg_name}_${stra_suffix}_${type_suffix}_${inc_suffix}_${scale_suffix}"
                     mkdir -p "${OUTPUT_DIR}/${EXP_NAME}"
                     if [ -f "${OUTPUT_DIR}/${EXP_NAME}/DONE" ]; then
                         echo "Skipping ${EXP_NAME} (Already Done)"
