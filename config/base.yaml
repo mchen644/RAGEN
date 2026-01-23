@@ -85,13 +85,14 @@ algorithm:
   high_level_gamma: 0.95
   adv_estimator: gae
   bi_level_gae: False
+  zero_task_advantage: False  # if True, zero out advantages to remove task-driven policy gradient
   kl_penalty: kl  # how to estimate kl divergence
   kl_ctrl:
     type: fixed
     kl_coef: 0.000
 
 trainer:
-  project_name: ragen_latest
+  project_name: ragen_profiling
   experiment_name: test
   local_log_dir: "results/"
   save_freq: 100

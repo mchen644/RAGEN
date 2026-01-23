@@ -530,6 +530,10 @@ class RayAgentTrainer(VerlRayPPOTrainer):
             config=OmegaConf.to_container(self.config, resolve=True),
         )
 
+        def _finish_logger():
+            if hasattr(logger, "finish"):
+                logger.finish()
+
         self.global_steps = 0
 
         # load checkpoint before doing anything
@@ -542,6 +546,7 @@ class RayAgentTrainer(VerlRayPPOTrainer):
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
+                _finish_logger()
                 return
 
         # add tqdm
@@ -784,6 +789,10 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                     advantages = advantages / response_relative_lengths.unsqueeze(-1) 
                     batch.batch["advantages"] = advantages
 
+                # Task-agnostic ablation: remove task-driven policy gradient by zeroing advantages
+                if self.config.algorithm.get("zero_task_advantage", False):
+                    batch.batch["advantages"] = torch.zeros_like(batch.batch["advantages"])
+
                 # update critic
                 if self.use_critic:
                     with marked_timer("update_critic", timing_raw, color="pink"):
@@ -860,6 +869,7 @@ class RayAgentTrainer(VerlRayPPOTrainer):
 
             if is_last_step:
                 pprint(f"Final validation metrics: {last_val_metrics}")
+                _finish_logger()
                 progress_bar.close()
                 return
 
