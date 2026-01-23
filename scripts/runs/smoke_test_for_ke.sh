@@ -3,8 +3,8 @@
 # PPO + 3B + Thinking Sokoban, 50 steps
 # Group 1: KL sweep (4 filter ratios × 4 KL values = 16 runs), entropy=0
 # Group 2: Entropy sweep (4 filter ratios × 4 entropy values = 16 runs), KL=0
-# Group 3: Task-agnostic KL x Entropy (1 filter ratio × 4 KL × 4 entropy = 16 runs)
-# Group 4: KL=0 and Entropy=0 (4 filter ratios = 4 runs)
+# Group 3: KL=0 and Entropy=0 (4 filter ratios = 4 runs)
+# Group 4: Task-agnostic KL x Entropy (1 filter ratio × 4 KL × 4 entropy = 16 runs)
 # Group 5: No filter, KL x Entropy (1 filter ratio × 4 KL × 4 entropy = 16 runs)
 # Sync wandb: wandb sync wandb/offline-run-*
 
@@ -20,12 +20,87 @@ CONFIG="_2_sokoban"
 ENV_GROUPS=8
 GROUP_SIZE=16
 
-LOG_FILE="smoke_test_results_${MODEL_SIZE}.log"
+LOG_BASE="smoke_test_results_${MODEL_SIZE}"
 
 # GPU settings (one job per GPU)
 GPUS=(0 1 2 3 4 5 6 7)
 # Skip runs already recorded in the log (set to "success" or "success fail")
 SKIP_STATUSES=("success")
+
+# Group selection
+# Usage: bash scripts/runs/smoke_test_for_ke.sh --groups 1,3,5 --kl-type kl
+# Default: all groups
+GROUP_SET="1,2,3,4,5"
+# KL loss type (single). Examples: kl, mse, low_var_kl
+KL_LOSS_TYPE="low_var_kl"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -g|--groups)
+            if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+                echo "Error: --groups requires a value like 1,2,3"
+                exit 1
+            fi
+            GROUP_SET="$2"
+            shift 2
+            ;;
+        --groups=*)
+            GROUP_SET="${1#--groups=}"
+            shift 1
+            ;;
+        --kl-type)
+            if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+                echo "Error: --kl-type requires a value like kl|mse|low_var_kl"
+                exit 1
+            fi
+            KL_LOSS_TYPE="$2"
+            shift 2
+            ;;
+        --kl-type=*)
+            KL_LOSS_TYPE="${1#--kl-type=}"
+            shift 1
+            ;;
+        --steps)
+            if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+                echo "Error: --steps requires a value like 50"
+                exit 1
+            fi
+            STEPS="$2"
+            shift 2
+            ;;
+        --steps=*)
+            STEPS="${1#--steps=}"
+            shift 1
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--groups 1,2,3] [--kl-type kl|mse|low_var_kl] [--steps N]"
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            echo "Usage: $0 [--groups 1,2,3] [--kl-type kl|mse|low_var_kl] [--steps N]"
+            exit 1
+            ;;
+    esac
+done
+
+# normalize spaces if user passes "1, 4" etc.
+GROUP_SET="${GROUP_SET//[[:space:]]/}"
+KL_LOSS_TYPE="${KL_LOSS_TYPE//[[:space:]]/}"
+
+LOG_FILE="${LOG_BASE}_${KL_LOSS_TYPE}.log"
+
+IFS=',' read -r -a GROUP_LIST <<< "$GROUP_SET"
+
+has_group() {
+    local g="$1"
+    local item
+    for item in "${GROUP_LIST[@]}"; do
+        if [ "$item" = "$g" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Collapse detection settings
 COLLAPSE_FIRST_TURN=true
@@ -62,7 +137,8 @@ run_experiment() {
     local kl_coef=$3
     local entropy_coef=$4
     local zero_task_advantage=$5
-    local gpu_id=$6
+    local kl_loss_type=$6
+    local gpu_id=$7
 
     # Determine if KL loss should be enabled
     local use_kl_loss="False"
@@ -73,6 +149,7 @@ run_experiment() {
     START=$(date +%s)
     WANDB_MODE=offline WANDB_CONSOLE=off CUDA_VISIBLE_DEVICES="${gpu_id}" python train.py --config-name $CONFIG \
         model_path="${MODEL_PATH}" \
+        trainer.project_name="ragen-smoke-test" \
         trainer.total_training_steps=${STEPS} \
         trainer.experiment_name=${name} \
         trainer.logger="['console','wandb']" \
@@ -90,9 +167,10 @@ run_experiment() {
         collapse_detection.num_samples=${COLLAPSE_NUM_SAMPLES} \
         actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
         actor_rollout_ref.actor.kl_loss_coef=${kl_coef} \
-        actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+        actor_rollout_ref.actor.kl_loss_type=${kl_loss_type} \
         actor_rollout_ref.actor.entropy_coeff=${entropy_coef} \
-        actor_rollout_ref.rollout.rollout_filter_ratio=${filter_ratio} \
+        actor_rollout_ref.actor.filter_loss_scaling="sqrt" \
+        actor_rollout_ref.rollout.rollout_filter_value=${filter_ratio} \
         es_manager.train.env_groups=${ENV_GROUPS} \
         es_manager.train.group_size=${GROUP_SIZE} \
         2>&1 | tee "logs/${name}.log"
@@ -142,21 +220,30 @@ already_done() {
     return 1
 }
 
-# GPU queue
-GPU_QUEUE=$(mktemp -u)
-mkfifo "$GPU_QUEUE"
-exec {GPU_FD}<>"$GPU_QUEUE"
-rm "$GPU_QUEUE"
-for gpu in "${GPUS[@]}"; do
-    echo "$gpu" >&$GPU_FD
-done
+# Batch scheduler: run 8 experiments concurrently, then wait + sleep 30s.
+MAX_PARALLEL=8
+batch_count=0
+batch_pids=()
 
-run_with_gpu() {
+wait_batch() {
+    if [ $batch_count -eq 0 ]; then
+        return 0
+    fi
+    for pid in "${batch_pids[@]}"; do
+        wait "$pid"
+    done
+    batch_pids=()
+    batch_count=0
+    sleep 30
+}
+
+start_job() {
     local name=$1
     local filter_ratio=$2
     local kl_coef=$3
     local entropy_coef=$4
     local zero_task_advantage=$5
+    local kl_loss_type=$6
     local gpu_id
 
     if already_done "$name"; then
@@ -164,121 +251,113 @@ run_with_gpu() {
         return 0
     fi
 
-    while true; do
-        if read -r -u $GPU_FD gpu_id; then
-            if [ -n "$gpu_id" ] && [[ " ${GPUS[*]} " == *" ${gpu_id} "* ]]; then
-                break
-            fi
-        fi
-        sleep 0.1
-    done
-    run_experiment "$name" "$filter_ratio" "$kl_coef" "$entropy_coef" "$zero_task_advantage" "$gpu_id"
-    echo "$gpu_id" >&$GPU_FD
-    sleep 30
+    gpu_id=${GPUS[$batch_count]}
+    run_experiment "$name" "$filter_ratio" "$kl_coef" "$entropy_coef" "$zero_task_advantage" "$kl_loss_type" "$gpu_id" &
+    batch_pids+=("$!")
+    batch_count=$((batch_count + 1))
+
+    if [ $batch_count -ge $MAX_PARALLEL ]; then
+        wait_batch
+    fi
 }
 
-# ============================================================
-# Group 1: KL sweep (entropy=0)
-# ============================================================
-echo "=== Group 1: KL sweep (entropy=0) ===" | tee -a $LOG_FILE
-echo "Filter ratios: ${FILTER_RATIOS[*]}" | tee -a $LOG_FILE
-echo "KL coeffs: ${KL_COEFFS[*]}" | tee -a $LOG_FILE
-echo "" | tee -a $LOG_FILE
+if has_group 1; then
+    echo "=== Group 1: KL sweep (entropy=0) ===" | tee -a $LOG_FILE
+    echo "Filter ratios: ${FILTER_RATIOS[*]}" | tee -a $LOG_FILE
+    echo "KL coeffs: ${KL_COEFFS[*]}" | tee -a $LOG_FILE
+    echo "" | tee -a $LOG_FILE
 
-for i in "${!FILTER_RATIOS[@]}"; do
-    filter_ratio=${FILTER_RATIOS[$i]}
-    filter_name=${FILTER_NAMES[$i]}
-    for kl_coef in "${KL_COEFFS[@]}"; do
-        kl_name=$(echo $kl_coef | sed 's/\.//g')
-        exp_name="smoke-ppo-sokoban-${filter_name}-kl${kl_name}-ent0"
-        run_with_gpu "$exp_name" "$filter_ratio" "$kl_coef" "0" "False" &
+    for i in "${!FILTER_RATIOS[@]}"; do
+        filter_ratio=${FILTER_RATIOS[$i]}
+        filter_name=${FILTER_NAMES[$i]}
+        for kl_coef in "${KL_COEFFS[@]}"; do
+            kl_name=$(echo $kl_coef | sed 's/\.//g')
+            exp_name="g1-smoke-ppo-sokoban-${filter_name}-kl${kl_name}-ent0-${KL_LOSS_TYPE}"
+            start_job "$exp_name" "$filter_ratio" "$kl_coef" "0" "False" "$KL_LOSS_TYPE"
+        done
     done
-done
 
-wait
+    wait_batch
+fi
 
-# ============================================================
-# Group 2: Entropy sweep (KL=0)
-# ============================================================
-echo "=== Group 2: Entropy sweep (KL=0) ===" | tee -a $LOG_FILE
-echo "Filter ratios: ${FILTER_RATIOS[*]}" | tee -a $LOG_FILE
-echo "Entropy coeffs: ${ENTROPY_COEFFS[*]}" | tee -a $LOG_FILE
-echo "" | tee -a $LOG_FILE
+if has_group 2; then
+    echo "=== Group 2: Entropy sweep (KL=0) ===" | tee -a $LOG_FILE
+    echo "Filter ratios: ${FILTER_RATIOS[*]}" | tee -a $LOG_FILE
+    echo "Entropy coeffs: ${ENTROPY_COEFFS[*]}" | tee -a $LOG_FILE
+    echo "" | tee -a $LOG_FILE
 
-for i in "${!FILTER_RATIOS[@]}"; do
-    filter_ratio=${FILTER_RATIOS[$i]}
-    filter_name=${FILTER_NAMES[$i]}
-    for entropy_coef in "${ENTROPY_COEFFS[@]}"; do
-        ent_name=$(echo $entropy_coef | sed 's/\.//g')
-        exp_name="smoke-ppo-sokoban-${filter_name}-kl0-ent${ent_name}"
-        run_with_gpu "$exp_name" "$filter_ratio" "0" "$entropy_coef" "False" &
+    for i in "${!FILTER_RATIOS[@]}"; do
+        filter_ratio=${FILTER_RATIOS[$i]}
+        filter_name=${FILTER_NAMES[$i]}
+        for entropy_coef in "${ENTROPY_COEFFS[@]}"; do
+            ent_name=$(echo $entropy_coef | sed 's/\.//g')
+            exp_name="g2-smoke-ppo-sokoban-${filter_name}-kl0-ent${ent_name}-${KL_LOSS_TYPE}"
+            start_job "$exp_name" "$filter_ratio" "0" "$entropy_coef" "False" "$KL_LOSS_TYPE"
+        done
     done
-done
 
-wait
+    wait_batch
+fi
 
-# ============================================================
-# Group 3: KL x Entropy sweep (task-agnostic, 16 runs)
-# ============================================================
-echo "=== Group 3: KL x Entropy sweep (task-agnostic) ===" | tee -a $LOG_FILE
-echo "Filter ratios: ${TA_FILTER_RATIOS[*]}" | tee -a $LOG_FILE
-echo "KL coeffs: ${KL_COEFFS[*]}" | tee -a $LOG_FILE
-echo "Entropy coeffs: ${ENTROPY_COEFFS[*]}" | tee -a $LOG_FILE
-echo "" | tee -a $LOG_FILE
+if has_group 3; then
+    echo "=== Group 3: KL=0 and Entropy=0 ===" | tee -a $LOG_FILE
+    echo "Filter ratios: ${FILTER_RATIOS[*]}" | tee -a $LOG_FILE
+    echo "" | tee -a $LOG_FILE
 
-for i in "${!TA_FILTER_RATIOS[@]}"; do
-    filter_ratio=${TA_FILTER_RATIOS[$i]}
-    filter_name=${TA_FILTER_NAMES[$i]}
+    for i in "${!FILTER_RATIOS[@]}"; do
+        filter_ratio=${FILTER_RATIOS[$i]}
+        filter_name=${FILTER_NAMES[$i]}
+        exp_name="g3-smoke-ppo-sokoban-${filter_name}-kl0-ent0-${KL_LOSS_TYPE}"
+        start_job "$exp_name" "$filter_ratio" "0" "0" "False" "$KL_LOSS_TYPE"
+    done
+
+    wait_batch
+fi
+
+if has_group 4; then
+    echo "=== Group 4: KL x Entropy sweep (task advantage=0, no filter) ===" | tee -a $LOG_FILE
+    echo "Filter ratios: ${TA_FILTER_RATIOS[*]}" | tee -a $LOG_FILE
+    echo "KL coeffs: ${KL_COEFFS[*]}" | tee -a $LOG_FILE
+    echo "Entropy coeffs: ${ENTROPY_COEFFS[*]}" | tee -a $LOG_FILE
+    echo "" | tee -a $LOG_FILE
+
+    for i in "${!TA_FILTER_RATIOS[@]}"; do
+        filter_ratio=${TA_FILTER_RATIOS[$i]}
+        filter_name=${TA_FILTER_NAMES[$i]}
+        for kl_coef in "${KL_COEFFS[@]}"; do
+            kl_name=$(echo $kl_coef | sed 's/\.//g')
+            for entropy_coef in "${ENTROPY_COEFFS[@]}"; do
+                ent_name=$(echo $entropy_coef | sed 's/\.//g')
+                exp_name="g4-smoke-ppo-sokoban-ta-${filter_name}-kl${kl_name}-ent${ent_name}-${KL_LOSS_TYPE}"
+                start_job "$exp_name" "$filter_ratio" "$kl_coef" "$entropy_coef" "True" "$KL_LOSS_TYPE"
+            done
+        done
+    done
+
+    wait_batch
+fi
+
+if has_group 5; then
+    echo "=== Group 5: KL x Entropy sweep (task advantage=1, no filter) ===" | tee -a $LOG_FILE
+    echo "Filter ratios: 1.0 (no filter)" | tee -a $LOG_FILE
+    echo "KL coeffs: ${KL_COEFFS[*]}" | tee -a $LOG_FILE
+    echo "Entropy coeffs: ${ENTROPY_COEFFS[*]}" | tee -a $LOG_FILE
+    echo "" | tee -a $LOG_FILE
+
+    NOFILTER_RATIO=1.0
+    NOFILTER_NAME="nofilter"
+
     for kl_coef in "${KL_COEFFS[@]}"; do
         kl_name=$(echo $kl_coef | sed 's/\.//g')
         for entropy_coef in "${ENTROPY_COEFFS[@]}"; do
             ent_name=$(echo $entropy_coef | sed 's/\.//g')
-            exp_name="smoke-ppo-sokoban-ta-${filter_name}-kl${kl_name}-ent${ent_name}"
-            run_with_gpu "$exp_name" "$filter_ratio" "$kl_coef" "$entropy_coef" "True" &
+            exp_name="g5-smoke-ppo-sokoban-${NOFILTER_NAME}-kl${kl_name}-ent${ent_name}-${KL_LOSS_TYPE}"
+            start_job "$exp_name" "$NOFILTER_RATIO" "$kl_coef" "$entropy_coef" "False" "$KL_LOSS_TYPE"
         done
     done
-done
 
-wait
-
-# ============================================================
-# Group 4: KL=0 and Entropy=0 (4 runs)
-# ============================================================
-echo "=== Group 4: KL=0 and Entropy=0 ===" | tee -a $LOG_FILE
-echo "Filter ratios: ${FILTER_RATIOS[*]}" | tee -a $LOG_FILE
-echo "" | tee -a $LOG_FILE
-
-for i in "${!FILTER_RATIOS[@]}"; do
-    filter_ratio=${FILTER_RATIOS[$i]}
-    filter_name=${FILTER_NAMES[$i]}
-    exp_name="smoke-ppo-sokoban-${filter_name}-kl0-ent0"
-    run_with_gpu "$exp_name" "$filter_ratio" "0" "0" "False" &
-done
-
-wait
-
-# ============================================================
-# Group 5: No filter KL x Entropy sweep (16 runs)
-# ============================================================
-echo "=== Group 5: No filter KL x Entropy sweep ===" | tee -a $LOG_FILE
-echo "Filter ratios: 1.0 (no filter)" | tee -a $LOG_FILE
-echo "KL coeffs: ${KL_COEFFS[*]}" | tee -a $LOG_FILE
-echo "Entropy coeffs: ${ENTROPY_COEFFS[*]}" | tee -a $LOG_FILE
-echo "" | tee -a $LOG_FILE
-
-NOFILTER_RATIO=1.0
-NOFILTER_NAME="nofilter"
-
-for kl_coef in "${KL_COEFFS[@]}"; do
-    kl_name=$(echo $kl_coef | sed 's/\.//g')
-    for entropy_coef in "${ENTROPY_COEFFS[@]}"; do
-        ent_name=$(echo $entropy_coef | sed 's/\.//g')
-        exp_name="smoke-ppo-sokoban-${NOFILTER_NAME}-kl${kl_name}-ent${ent_name}"
-        run_with_gpu "$exp_name" "$NOFILTER_RATIO" "$kl_coef" "$entropy_coef" "False" &
-    done
-done
-
-wait
+    wait_batch
+fi
 
 echo "=== Smoke Test Completed: $(date) ===" | tee -a $LOG_FILE
 
