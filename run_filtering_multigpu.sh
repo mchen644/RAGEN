@@ -79,10 +79,14 @@ mkdir -p "$OUTPUT_DIR"
 
 # Define configurations to iterate
 CONFIGS=(
+    "top_p 0.5 topp50"
     "top_p 0.7 topp70"
     "top_p 0.9 topp90"
+    "top_p 0.95 topp95"
+    "min_p 0.3 minp30"
     "min_p 0.5 minp50"
     "min_p 0.8 minp80"
+    "min_p 0.95 minp95"
     "top_k 4 topk4"
     "top_k 6 topk6"
 )
