@@ -62,13 +62,16 @@ NGPUS_PER_NODE="${NGPUS}"
 # CUDA_VISIBLE_DEVICES="0"
 
 # -----------------------
-# Common flags
+# Common flags helper
 # -----------------------
-COMMON_FLAGS="trainer.total_training_steps=400 micro_batch_size_per_gpu=4 ppo_mini_batch_size=32 trainer.save_freq=-1 \
+get_common_flags() {
+  local metric=$1
+  echo "trainer.total_training_steps=400 micro_batch_size_per_gpu=4 ppo_mini_batch_size=32 trainer.save_freq=-1 \
     trainer.n_gpus_per_node=${NGPUS_PER_NODE} system.CUDA_VISIBLE_DEVICES=\"${CUDA_VISIBLE_DEVICES}\" \
     algorithm.kl_ctrl.kl_coef=0.001 actor_rollout_ref.actor.kl_loss_coef=0.001 \
-    actor_rollout_ref.rollout.rollout_filter_metric=${METRIC} \
+    actor_rollout_ref.rollout.rollout_filter_metric=${metric} \
     es_manager.train.env_groups=8 es_manager.train.group_size=16 es_manager.train.env_configs.n_groups=[8]"
+}
 
 ENV="_2_sokoban"
 OUTPUT_DIR="/mnt/permanent/deimos/20260120_sokoban_filters"
@@ -100,31 +103,34 @@ LOSS_SCALES=(
 run_exps_for_algo() {
     local alg_name=$1
     local alg_flag=$2
+    local metric=$3
+    local common_flags
+    common_flags=$(get_common_flags "$metric")
 
     echo "========================================"
-    echo "Starting experiments for: $alg_name"
+    echo "Starting experiments for: $alg_name | Metric: $metric"
     echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} | n_gpus_per_node=${NGPUS_PER_NODE}"
     echo "========================================"
 
     # 1. Baseline: No Filtering
-    EXP_NAME="soko_3b_${alg_name}_nofilter"
-    mkdir -p "${OUTPUT_DIR}/${EXP_NAME}"
-    if [ -f "${OUTPUT_DIR}/${EXP_NAME}/DONE" ]; then
-        echo "Skipping ${EXP_NAME} (Already Done)"
-    else
-        echo "Running Baseline: $EXP_NAME (No Filtering)"
-        python train.py --config-name "$ENV" \
-            trainer.experiment_name="${EXP_NAME}" \
-            actor_rollout_ref.rollout.rollout_filter_strategy="top_p" \
-            actor_rollout_ref.rollout.rollout_filter_value=1.0 \
-            actor_rollout_ref.rollout.rollout_filter_type="largest" \
-            actor_rollout_ref.rollout.rollout_filter_include_zero=True \
-            $alg_flag \
-            $COMMON_FLAGS \
-            trainer.default_local_dir="${OUTPUT_DIR}/${EXP_NAME}"
+    # local base_exp_name="soko_3b_${alg_name}_${metric}_nofilter"
+    # mkdir -p "${OUTPUT_DIR}/${base_exp_name}"
+    # if [ -f "${OUTPUT_DIR}/${base_exp_name}/DONE" ]; then
+    #     echo "Skipping ${base_exp_name} (Already Done)"
+    # else
+    #     echo "Running Baseline: $base_exp_name (No Filtering)"
+    #     python train.py --config-name "$ENV" \
+    #         trainer.experiment_name="${base_exp_name}" \
+    #         actor_rollout_ref.rollout.rollout_filter_strategy="top_p" \
+    #         actor_rollout_ref.rollout.rollout_filter_value=1.0 \
+    #         actor_rollout_ref.rollout.rollout_filter_type="largest" \
+    #         actor_rollout_ref.rollout.rollout_filter_include_zero=True \
+    #         $alg_flag \
+    #         $common_flags \
+    #         trainer.default_local_dir="${OUTPUT_DIR}/${base_exp_name}"
 
-        touch "${OUTPUT_DIR}/${EXP_NAME}/DONE"
-    fi
+    #     touch "${OUTPUT_DIR}/${base_exp_name}/DONE"
+    # fi
 
     # 2. Grid Search
     for config_str in "${CONFIGS[@]}"; do
@@ -139,25 +145,25 @@ run_exps_for_algo() {
                 for scale_str in "${LOSS_SCALES[@]}"; do
                     read -r scaling scale_suffix <<< "$scale_str"
 
-                    EXP_NAME="${EXP_NAME}_soko_3b_${alg_name}_${stra_suffix}_${type_suffix}_${inc_suffix}_${scale_suffix}"
-                    mkdir -p "${OUTPUT_DIR}/${EXP_NAME}"
-                    if [ -f "${OUTPUT_DIR}/${EXP_NAME}/DONE" ]; then
-                        echo "Skipping ${EXP_NAME} (Already Done)"
+                    local exp_name="soko_3b_${alg_name}_${metric}_${stra_suffix}_${type_suffix}_${inc_suffix}_${scale_suffix}"
+                    mkdir -p "${OUTPUT_DIR}/${exp_name}"
+                    if [ -f "${OUTPUT_DIR}/${exp_name}/DONE" ]; then
+                        echo "Skipping ${exp_name} (Already Done)"
                     else
-                        echo "Running Experiment: $EXP_NAME (Strategy: $strategy, Value: $value, Type: $ftype, IncludeZero: $inc_bool, Scaling: $scaling)"
+                        echo "Running Experiment: $exp_name (Strategy: $strategy, Value: $value, Type: $ftype, IncludeZero: $inc_bool, Scaling: $scaling)"
 
                         python train.py --config-name "$ENV" \
-                            trainer.experiment_name="${EXP_NAME}" \
+                            trainer.experiment_name="${exp_name}" \
                             actor_rollout_ref.rollout.rollout_filter_strategy="${strategy}" \
                             actor_rollout_ref.rollout.rollout_filter_value=${value} \
                             actor_rollout_ref.rollout.rollout_filter_type="${ftype}" \
                             actor_rollout_ref.rollout.rollout_filter_include_zero=${inc_bool} \
                             actor_rollout_ref.actor.filter_loss_scaling="${scaling}" \
                             $alg_flag \
-                            $COMMON_FLAGS \
-                            trainer.default_local_dir="${OUTPUT_DIR}/${EXP_NAME}"
+                            $common_flags \
+                            trainer.default_local_dir="${OUTPUT_DIR}/${exp_name}"
 
-                        touch "${OUTPUT_DIR}/${EXP_NAME}/DONE"
+                        touch "${OUTPUT_DIR}/${exp_name}/DONE"
                     fi
                 done
             done
@@ -165,18 +171,25 @@ run_exps_for_algo() {
     done
 }
 
-if [ "$ALGO" == "grpo" ]; then
-    run_exps_for_algo "grpo" "algorithm.adv_estimator=grpo"
-elif [ "$ALGO" == "ppo" ]; then
-    run_exps_for_algo "ppo" "algorithm.adv_estimator=gae"
-elif [ "$ALGO" == "all" ]; then
-    run_exps_for_algo "grpo" "algorithm.adv_estimator=grpo"
-    run_exps_for_algo "ppo" "algorithm.adv_estimator=gae"
-else
-    echo "Unknown algorithm argument: $ALGO"
-    echo "Usage: bash run_filtering_multigpu.sh [grpo|ppo|all] [reward_variance|entropy|entropy_variance]"
-    exit 1
-fi
+IFS=',' read -ra ALGOS <<< "$ALGO"
+IFS=',' read -ra METRICS <<< "$METRIC"
+
+for m in "${METRICS[@]}"; do
+    for a in "${ALGOS[@]}"; do
+        if [ "$a" == "grpo" ]; then
+            run_exps_for_algo "grpo" "algorithm.adv_estimator=grpo" "$m"
+        elif [ "$a" == "ppo" ]; then
+            run_exps_for_algo "ppo" "algorithm.adv_estimator=gae" "$m"
+        elif [ "$a" == "all" ]; then
+            run_exps_for_algo "grpo" "algorithm.adv_estimator=grpo" "$m"
+            run_exps_for_algo "ppo" "algorithm.adv_estimator=gae" "$m"
+        else
+            echo "Unknown algorithm argument: $a"
+            echo "Usage: bash run_filtering_multigpu.sh [grpo|ppo|all] [reward_variance|entropy|entropy_variance]"
+            exit 1
+        fi
+    done
+done
 
 echo "All requested experiments completed."
 
