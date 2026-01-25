@@ -1,9 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# usage: bash run_filtering_multigpu.sh [grpo|ppo|all] [reward_variance|entropy|entropy_variance]
+# usage: bash run_filtering_multigpu.sh [grpo|ppo|all] [metric] [largest|smallest|all]
 ALGO="${1:-grpo}" # default to grpo
 METRIC="${2:-reward_variance}" # default to reward_variance
+TYPE_ARG="${3:-largest,smallest}" # default to both
 EXP_NAME="final0123"
 DONE_LIST="filter_exp_donelist.txt"
 touch "$DONE_LIST"
@@ -85,12 +86,12 @@ CONFIGS=(
     "top_p 0.7 topp70"
     "top_p 0.9 topp90"
     "top_p 0.95 topp95"
-    "min_p 0.3 minp30"
     "min_p 0.5 minp50"
     "min_p 0.8 minp80"
     "min_p 0.95 minp95"
     "top_k 4 topk4"
-    "top_k 6 topk6"
+    "top_f 0.5 topf50"
+    
 )
 
 TYPES=(
@@ -110,6 +111,7 @@ run_exps_for_algo() {
     local alg_name=$1
     local alg_flag=$2
     local metric=$3
+    local selected_types=("${@:4}")
     local common_flags
     common_flags=$(get_common_flags "$metric")
 
@@ -145,8 +147,13 @@ run_exps_for_algo() {
     for config_str in "${CONFIGS[@]}"; do
         read -r strategy value stra_suffix <<< "$config_str"
 
-        for type_str in "${TYPES[@]}"; do
-            read -r ftype type_suffix <<< "$type_str"
+        for ftype in "${selected_types[@]}"; do
+            local type_suffix
+            if [ "$ftype" == "smallest" ]; then
+                type_suffix="small"
+            else
+                type_suffix="large"
+            fi
 
             for inc_str in "${INC_ZEROS[@]}"; do
                 read -r inc_bool inc_suffix <<< "$inc_str"
@@ -186,18 +193,25 @@ run_exps_for_algo() {
 IFS=',' read -ra ALGOS <<< "$ALGO"
 IFS=',' read -ra METRICS <<< "$METRIC"
 
+# Handle TYPE_ARG
+if [ "$TYPE_ARG" == "all" ]; then
+    SELECTED_TYPES=("largest" "smallest")
+else
+    IFS=',' read -ra SELECTED_TYPES <<< "$TYPE_ARG"
+fi
+
 for m in "${METRICS[@]}"; do
     for a in "${ALGOS[@]}"; do
         if [ "$a" == "grpo" ]; then
-            run_exps_for_algo "grpo" "algorithm.adv_estimator=grpo" "$m"
+            run_exps_for_algo "grpo" "algorithm.adv_estimator=grpo" "$m" "${SELECTED_TYPES[@]}"
         elif [ "$a" == "ppo" ]; then
-            run_exps_for_algo "ppo" "algorithm.adv_estimator=gae" "$m"
+            run_exps_for_algo "ppo" "algorithm.adv_estimator=gae" "$m" "${SELECTED_TYPES[@]}"
         elif [ "$a" == "all" ]; then
-            run_exps_for_algo "grpo" "algorithm.adv_estimator=grpo" "$m"
-            run_exps_for_algo "ppo" "algorithm.adv_estimator=gae" "$m"
+            run_exps_for_algo "grpo" "algorithm.adv_estimator=grpo" "$m" "${SELECTED_TYPES[@]}"
+            run_exps_for_algo "ppo" "algorithm.adv_estimator=gae" "$m" "${SELECTED_TYPES[@]}"
         else
             echo "Unknown algorithm argument: $a"
-            echo "Usage: bash run_filtering_multigpu.sh [grpo|ppo|all] [reward_variance|entropy|entropy_variance]"
+            echo "Usage: bash run_filtering_multigpu.sh [grpo|ppo|all] [metric] [largest|smallest|all]"
             exit 1
         fi
     done
