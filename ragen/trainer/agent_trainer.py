@@ -464,6 +464,7 @@ class RayAgentTrainer(VerlRayPPOTrainer):
         # create collapse detector
         collapse_cfg = self.config.get("collapse_detection", {})
         context_window_mode = getattr(self.config.agent_proxy, "context_window_mode", "full")
+        enable_think = bool(getattr(self.config.agent_proxy, "enable_think", True))
         # num_samples: int for specific count, "all" for using all samples
         num_samples_cfg = collapse_cfg.get("num_samples", "all")
         if num_samples_cfg is None:
@@ -479,12 +480,18 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                 raise ValueError("collapse_detection.num_samples must be an int or 'all'") from exc
             if num_samples <= 0:
                 raise ValueError("collapse_detection.num_samples must be a positive int or 'all'")
+        collapse_first = collapse_cfg.get("first_turn_enabled", False)
+        collapse_multi = collapse_cfg.get("multi_turn_enabled", False)
+        if not enable_think:
+            collapse_first = False
+            collapse_multi = False
+
         self.collapse_detector = CollapseDetector(
             compute_freq=collapse_cfg.get("compute_freq", 10),
             micro_batch_size=collapse_cfg.get("micro_batch_size", 16),
             context_window_mode=context_window_mode,
-            multi_turn_enabled=collapse_cfg.get("multi_turn_enabled", False),
-            first_turn_enabled=collapse_cfg.get("first_turn_enabled", False),
+            multi_turn_enabled=collapse_multi,
+            first_turn_enabled=collapse_first,
             num_samples=num_samples,
             std_eps=collapse_cfg.get("std_eps", 1e-3),
             ema_decay=collapse_cfg.get("ema_decay", 0.9),

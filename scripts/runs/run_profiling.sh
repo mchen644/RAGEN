@@ -188,7 +188,8 @@ get_gpu_model_label() {
 }
 
 GPU_MODEL_LABEL=$(get_gpu_model_label)
-LOG_BASENAME="profiling_results_${MODEL_SIZE}_samples${COLLAPSE_NUM_SAMPLES}_${GPU_MODEL_LABEL}"
+GPU_LOG_LABEL="${GPUS_PER_EXP}x${GPU_MODEL_LABEL}"
+LOG_BASENAME="profiling_results_${MODEL_SIZE}_samples${COLLAPSE_NUM_SAMPLES}_${GPU_LOG_LABEL}"
 LOG_FILE="${LOG_BASENAME}.log"
 RESULT_DIR="logs/${LOG_BASENAME}"
 
