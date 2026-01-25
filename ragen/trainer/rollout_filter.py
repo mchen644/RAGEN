@@ -107,6 +107,21 @@ class RolloutFilter:
             return indices[top_groups_local_indices]
 
         elif self.strategy == "top_k":
+            # top-k: choose top k fraction of the groups
+            k = int(self.config.value * self.num_groups)
+            k = min(k, indices.numel())
+            k = max(k, 1) # Ensure at least 1
+            
+            if self.filter_type == "smallest":
+                top_groups_local_indices = (-scores).topk(k).indices
+            elif self.filter_type == "largest":
+                top_groups_local_indices = scores.topk(k).indices
+            else:
+                raise ValueError(f"Invalid rollout filter type: {self.filter_type}")
+            
+            return indices[top_groups_local_indices]
+
+        elif self.strategy == "top_k_abs":
             k = int(self.config.value)
             k = min(k, indices.numel())
             k = max(k, 1) # Ensure at least 1
@@ -136,20 +151,7 @@ class RolloutFilter:
             
             return indices[mask]
 
-        elif self.strategy == "top_f":
-            # top-f: choose top f fraction of the groups
-            k = int(self.config.value * self.num_groups)
-            k = min(k, indices.numel())
-            k = max(k, 1) # Ensure at least 1
-            
-            if self.filter_type == "smallest":
-                top_groups_local_indices = (-scores).topk(k).indices
-            elif self.filter_type == "largest":
-                top_groups_local_indices = scores.topk(k).indices
-            else:
-                raise ValueError(f"Invalid rollout filter type: {self.filter_type}")
-            
-            return indices[top_groups_local_indices]
+            return indices[mask]
             
         else:
              raise ValueError(f"Unknown strategy: {self.strategy}")

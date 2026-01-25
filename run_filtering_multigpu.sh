@@ -89,7 +89,7 @@ CONFIGS=(
     "min_p 0.5 minp50"
     "min_p 0.8 minp80"
     "min_p 0.95 minp95"
-    "top_k 4 topk4"
+    "top_k_abs 4 topk4"
 )
 
 TYPES=(

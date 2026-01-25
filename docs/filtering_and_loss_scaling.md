@@ -23,26 +23,26 @@ We have implemented three strategies to filter rollout groups based on their rew
     -   **Constraint**: Always keeps at least one group.
 
 ### `top_k`
--   **Description**: Selects the top `k` groups with the highest (or lowest) scores.
+-   **Description**: Selects the top fraction `value` (e.g., 0.5 for 50%) of groups.
 -   **Configuration**:
     ```yaml
     actor_rollout_ref:
       rollout:
         rollout_filter_strategy: top_k
-        rollout_filter_value: 4  # Keep top 4 groups
+        rollout_filter_value: 0.5  # Keep top 50% groups
     ```
--   **Behavior**: A simple sorting and slicing operation.
 
-### `top_f`
--   **Description**: Selects the top `f` fraction of groups with the highest (or lowest) scores. For example, `value=0.5` would keep the top 50% of groups.
+### `top_k_abs`
+-   **Description**: Selects specifically the top `k` groups with the highest (or lowest) scores.
 -   **Configuration**:
     ```yaml
     actor_rollout_ref:
       rollout:
-        rollout_filter_strategy: top_f
-        rollout_filter_value: 0.5  # Keep top 50% of groups
+        rollout_filter_strategy: top_k_abs
+        rollout_filter_value: 4  # Keep top 4 groups
     ```
--   **Behavior**: Groups are sorted by score, and the top `N * value` groups are selected.
+-   **Behavior**: A simple sorting and slicing operation. Useful for guaranteeing a fixed batch size of "good" examples.
+
 
 ### `min_p`
 -   **Description**: Selects groups whose score is at least a fraction `value` of the maximum score in the batch.
@@ -142,7 +142,8 @@ A unified script `run_filtering_exps.sh` is provided to run grid search experime
     -   `rollout_filter_strategy`: `top_p`, `top_k`, `min_p`
     -   `rollout_filter_value`:
         - `top_p`: 0.7, 0.85 (Nucleus Sampling)
-        - `top_k`: 4, 6 (Keep top 50%, 75% of 8 groups)
+        - `top_k`: 0.5, 0.75 (Keep top 50%, 75% of groups)
+        - `top_k_abs`: 4, 6 (Keep top 4, 6 groups)
         - `min_p`: 0.5, 0.8 (Keep >50%, >80% of max score)
     -   `rollout_filter_include_zero`: `False` (default for grid)
 

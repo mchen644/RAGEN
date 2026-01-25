@@ -57,7 +57,7 @@ actor_rollout_ref:
     max_num_batched_tokens: 8192 # set only when enable_chunked_prefill is true
     temperature: 1
     rollout_filter_value: 0.9
-    rollout_filter_strategy: top_p # top_p, top_k, min_p, top_f
+    rollout_filter_strategy: top_p # top_p, top_k, top_k_abs, min_p
     rollout_filter_type: largest # smallest or largest
     rollout_filter_include_zero: True # whether to include groups with 0 score in the filtering
     rollout_filter_metric: reward_variance
