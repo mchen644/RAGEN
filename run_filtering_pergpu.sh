@@ -1,11 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-# usage: bash run_filtering_pergpu.sh [grpo|ppo|all] [metric] [largest|smallest|all] [ngpus]
+# usage: bash run_filtering_pergpu.sh [grpo|ppo|all] [metric] [largest|smallest|all] [total_gpus] [gpus_per_exp]
 ALGO="${1:-grpo}" # default to grpo
 METRIC="${2:-reward_variance}" # default to reward_variance
 TYPE_ARG="${3:-largest,smallest}" # default to both
-NGPUS_LIMIT="${4:-8}" # default to 8 GPUs
+NGPUS_LIMIT="${4:-8}" # total GPUs available
+GPUS_PER_EXP="${5:-1}" # GPUs to use per experiment
 EXP_NAME="final0123"
 DONE_LIST="filter_exp_donelist.txt"
 touch "$DONE_LIST"
@@ -14,14 +15,12 @@ touch "$DONE_LIST"
 # Parallel GPU Management
 # -----------------------
 # Create a FIFO to act as a semaphore/pool for GPU IDs
-# This limits concurrency and assigns a unique GPU to each job
 GPU_POOL_FIFO="/tmp/gpu_pool_$$"
 mkfifo "$GPU_POOL_FIFO"
 exec 3<>"$GPU_POOL_FIFO"
 rm "$GPU_POOL_FIFO" # Securely cleanup but keep fd open
 
 # Fill the pool with GPU IDs [0, 1, ..., N-1]
-# We assume GPUs 0..N-1 are available
 for ((i=0; i<NGPUS_LIMIT; i++)); do
     echo "$i" >&3
 done
@@ -31,9 +30,9 @@ done
 # -----------------------
 get_common_flags() {
   local metric=$1
-  local gpu_id=$2
+  local gpu_ids=$2
   echo "trainer.total_training_steps=400 micro_batch_size_per_gpu=4 ppo_mini_batch_size=32 trainer.save_freq=-1 \
-    trainer.n_gpus_per_node=1 system.CUDA_VISIBLE_DEVICES=\"${gpu_id}\" \
+    trainer.n_gpus_per_node=${GPUS_PER_EXP} system.CUDA_VISIBLE_DEVICES=\"${gpu_ids}\" \
     algorithm.kl_ctrl.kl_coef=0.001 actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.rollout.rollout_filter_metric=${metric} \
     es_manager.train.env_groups=8 es_manager.train.group_size=16 es_manager.train.env_configs.n_groups=[8]"
@@ -70,7 +69,7 @@ run_exps_for_algo() {
     local selected_types=("${@:4}")
 
     echo "========================================"
-    echo "Starting parallel experiments for: $alg_name | Metric: $metric | Limit: $NGPUS_LIMIT GPUs"
+    echo "Starting parallel experiments for: $alg_name | Metric: $metric | Pool: $NGPUS_LIMIT GPUs | Per-Exp: $GPUS_PER_EXP"
     echo "========================================"
 
     # 1. Baseline: No Filtering
@@ -79,12 +78,18 @@ run_exps_for_algo() {
     if grep -q "^${base_exp_name}$" "$DONE_LIST"; then
         echo "Skipping ${base_exp_name} (Already in done-list)"
     else
-        # Acquire GPU
-        read -u 3 gpu_id
+        # Acquire GPUS_PER_EXP GPUs
+        local allocated_gpus=()
+        for ((i=0; i<GPUS_PER_EXP; i++)); do
+            read -u 3 gid
+            allocated_gpus+=("$gid")
+        done
+        local gpu_csv=$(IFS=,; echo "${allocated_gpus[*]}")
+
         (
-            echo "Running Baseline: $base_exp_name on GPU $gpu_id"
-            local flags=$(get_common_flags "$metric" "$gpu_id")
-            if CUDA_VISIBLE_DEVICES="$gpu_id" python train.py --config-name "$ENV" \
+            echo "Running Baseline: $base_exp_name on GPUs $gpu_csv"
+            local flags=$(get_common_flags "$metric" "$gpu_csv")
+            if CUDA_VISIBLE_DEVICES="$gpu_csv" python train.py --config-name "$ENV" \
                 trainer.experiment_name="${base_exp_name}" \
                 actor_rollout_ref.rollout.rollout_filter_strategy="top_p" \
                 actor_rollout_ref.rollout.rollout_filter_value=1.0 \
@@ -96,10 +101,12 @@ run_exps_for_algo() {
                 
                 echo "$base_exp_name" >> "$DONE_LIST"
             else
-                echo "ERROR: Baseline $base_exp_name failed on GPU $gpu_id." >&2
+                echo "ERROR: Baseline $base_exp_name failed on GPUs $gpu_csv." >&2
             fi
-            # Release GPU
-            echo "$gpu_id" >&3
+            # Release GPUs
+            for gid in "${allocated_gpus[@]}"; do
+                echo "$gid" >&3
+            done
         ) &
     fi
 
@@ -127,12 +134,18 @@ run_exps_for_algo() {
                     if grep -q "^${exp_name}$" "$DONE_LIST"; then
                         echo "Skipping ${exp_name} (Already in done-list)"
                     else
-                        # Acquire GPU (blocks if none available)
-                        read -u 3 gpu_id
+                        # Acquire GPUS_PER_EXP GPUs (blocks if not enough available)
+                        local allocated_gpus=()
+                        for ((i=0; i<GPUS_PER_EXP; i++)); do
+                            read -u 3 gid
+                            allocated_gpus+=("$gid")
+                        done
+                        local gpu_csv=$(IFS=,; echo "${allocated_gpus[*]}")
+
                         (
-                            echo "Running Experiment: $exp_name on GPU $gpu_id (Strategy: $strategy, Value: $value)"
-                            local flags=$(get_common_flags "$metric" "$gpu_id")
-                            if CUDA_VISIBLE_DEVICES="$gpu_id" python train.py --config-name "$ENV" \
+                            echo "Running Experiment: $exp_name on GPUs $gpu_csv (Strategy: $strategy, Value: $value)"
+                            local flags=$(get_common_flags "$metric" "$gpu_csv")
+                            if CUDA_VISIBLE_DEVICES="$gpu_csv" python train.py --config-name "$ENV" \
                                 trainer.experiment_name="${exp_name}" \
                                 actor_rollout_ref.rollout.rollout_filter_strategy="${strategy}" \
                                 actor_rollout_ref.rollout.rollout_filter_value=${value} \
@@ -145,10 +158,12 @@ run_exps_for_algo() {
                                 
                                 echo "$exp_name" >> "$DONE_LIST"
                             else
-                                echo "ERROR: Experiment $exp_name failed on GPU $gpu_id." >&2
+                                echo "ERROR: Experiment $exp_name failed on GPUs $gpu_csv." >&2
                             fi
-                            # Release GPU back to pool
-                            echo "$gpu_id" >&3
+                            # Release GPUs
+                            for gid in "${allocated_gpus[@]}"; do
+                                echo "$gid" >&3
+                            done
                         ) &
                     fi
                 done
@@ -179,7 +194,7 @@ for m in "${METRICS[@]}"; do
             run_exps_for_algo "ppo" "algorithm.adv_estimator=gae" "$m" "${SELECTED_TYPES[@]}"
         else
             echo "Unknown algorithm argument: $a"
-            echo "Usage: bash run_filtering_pergpu.sh [algo] [metric] [type] [ngpus]"
+            echo "Usage: bash run_filtering_pergpu.sh [algo] [metric] [type] [total_gpus] [gpus_per_exp]"
             exit 1
         fi
     done
