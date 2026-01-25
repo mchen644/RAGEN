@@ -190,8 +190,10 @@ get_gpu_model_label() {
 GPU_MODEL_LABEL=$(get_gpu_model_label)
 GPU_LOG_LABEL="${GPUS_PER_EXP}x${GPU_MODEL_LABEL}"
 LOG_BASENAME="profiling_results_${MODEL_SIZE}_samples${COLLAPSE_NUM_SAMPLES}_${GPU_LOG_LABEL}"
-LOG_FILE="${LOG_BASENAME}.log"
-RESULT_DIR="logs/${LOG_BASENAME}"
+LOG_DIR="logs/profiling_${GPU_LOG_LABEL}"
+LOG_DETAIL_DIR="logs/profiling_${GPU_LOG_LABEL}_details"
+LOG_FILE="${LOG_DIR}/${LOG_BASENAME}.log"
+RESULT_DIR="/tmp/ragen_profiling_results_${LOG_BASENAME}_$$"
 
 echo "=== RAGEN Profiling for $MODEL_SIZE: $(date) ===" | tee $LOG_FILE
 echo "GPU per exp: ${GPUS_PER_EXP}x${GPU_MODEL_LABEL} | Model Size: ${MODEL_SIZE} | Steps: ${STEPS} | Collapse: first_turn=${COLLAPSE_FIRST_TURN}, multi_turn=${COLLAPSE_MULTI_TURN}, num_samples=${COLLAPSE_NUM_SAMPLES}" | tee -a $LOG_FILE
@@ -220,6 +222,7 @@ run_experiment() {
         think_name="nothink"
     fi
     local name="${task}-${algo}-${filter}-${MODEL_SIZE}-${think_name}"
+    local exp_log="${LOG_DETAIL_DIR}/${name}.log"
     IFS=',' read -r -a gpu_ids <<< "$gpu_list"
     local gpus_per_exp=${#gpu_ids[@]}
 
@@ -237,19 +240,19 @@ run_experiment() {
         collapse_detection.first_turn_enabled=${COLLAPSE_FIRST_TURN} \
         collapse_detection.multi_turn_enabled=${COLLAPSE_MULTI_TURN} \
         collapse_detection.num_samples=${COLLAPSE_NUM_SAMPLES} \
-        "${extra_args[@]}" 2>&1 | tee "logs/${name}.log"
+        "${extra_args[@]}" 2>&1 | tee "${exp_log}"
     EXIT_CODE=${PIPESTATUS[0]} 
     END=$(date +%s)
 
     TOTAL_TIME=$((END - START))
 
     # Extract timing from log (if available) and format to 2 decimal places
-    TRAIN_TIME_RAW=$(grep -oP 'timing_s/train_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
-    EVAL_TIME_RAW=$(grep -oP 'timing_s/eval_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
-    TOTAL_TIME_RAW=$(grep -oP 'timing_s/total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
-    COLLAPSE_TIME_RAW=$(grep -oP 'timing_s/collapse_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
-    COLLAPSE_FIRST_TIME_RAW=$(grep -oP 'timing_s/collapse_first_turn_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
-    COLLAPSE_MULTI_TIME_RAW=$(grep -oP 'timing_s/collapse_multi_turn_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
+    TRAIN_TIME_RAW=$(grep -oP 'timing_s/train_total[:\s]+\K[\d.]+' "${exp_log}" | tail -1 || echo "")
+    EVAL_TIME_RAW=$(grep -oP 'timing_s/eval_total[:\s]+\K[\d.]+' "${exp_log}" | tail -1 || echo "")
+    TOTAL_TIME_RAW=$(grep -oP 'timing_s/total[:\s]+\K[\d.]+' "${exp_log}" | tail -1 || echo "")
+    COLLAPSE_TIME_RAW=$(grep -oP 'timing_s/collapse_total[:\s]+\K[\d.]+' "${exp_log}" | tail -1 || echo "")
+    COLLAPSE_FIRST_TIME_RAW=$(grep -oP 'timing_s/collapse_first_turn_total[:\s]+\K[\d.]+' "${exp_log}" | tail -1 || echo "")
+    COLLAPSE_MULTI_TIME_RAW=$(grep -oP 'timing_s/collapse_multi_turn_total[:\s]+\K[\d.]+' "${exp_log}" | tail -1 || echo "")
     TRAIN_TIME=$([ -n "$TRAIN_TIME_RAW" ] && printf "%.2f" "$TRAIN_TIME_RAW" || echo "N/A")
     EVAL_TIME=$([ -n "$EVAL_TIME_RAW" ] && printf "%.2f" "$EVAL_TIME_RAW" || echo "N/A")
     TOTAL_TIME_METRIC=$([ -n "$TOTAL_TIME_RAW" ] && printf "%.2f" "$TOTAL_TIME_RAW" || echo "N/A")
@@ -261,7 +264,7 @@ run_experiment() {
         STATUS="success"
     else
         STATUS="fail"
-        ERROR=$(tail -2 "logs/${name}.log" | tr '\n' ' ')
+        ERROR=$(tail -2 "${exp_log}" | tr '\n' ' ')
     fi
 
     # Store result for grouped summary
@@ -274,6 +277,8 @@ run_experiment() {
 }
 
 mkdir -p logs
+mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DETAIL_DIR"
 mkdir -p "$RESULT_DIR"
 rm -f "${RESULT_DIR}"/*.result
 
@@ -429,5 +434,8 @@ done
         done
     done
 } >> "$LOG_FILE"
+
+rm -f "${RESULT_DIR}"/*.result
+rmdir "${RESULT_DIR}" 2>/dev/null || true
 
 echo "=== Profiling Completed: $(date) ===" | tee -a $LOG_FILE
