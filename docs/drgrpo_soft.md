@@ -66,7 +66,7 @@ actor_rollout_ref:
     use_kl_loss: False
   rollout:
     rollout_filter_strategy: top_k
-    rollout_filter_value: 999  # Disable hard filtering (keep all)
+    rollout_filter_value: 8  # Keep all groups (when env_groups=8)
 ```
 
 ### Logged Metrics
@@ -80,21 +80,23 @@ When `soft_advantage_reweight=True`:
 ## Running Experiments
 
 ### Comparison Script
-Use the provided script to run ablation experiments:
+Use the provided script to run ablation experiments (jobs are scheduled across the GPU list; with enough GPUs all six can run concurrently):
 
 ```bash
-./scripts/runs/run_drgrpo_compare.sh --task sokoban --steps 200 --gpu 0
+bash /scripts/runs/run_drgrpo_compare.sh --task sokoban --steps 200 --gpus 0,1,2,3
 ```
 
 Options:
 - `--task`: `bandit`, `sokoban`, or `frozenlake`
 - `--steps`: Training steps (default: 200)
 - `--model_size`: Model size, e.g., `3B` (default: 3B)
-- `--gpu`: GPU ID (default: 0)
+- `--gpus`: Comma-separated GPU IDs (default: `0,1,2,3,4,5,6,7`)
+
+Note: the script sets `system.CUDA_VISIBLE_DEVICES` per job to ensure each experiment stays on its assigned GPU.
 
 ### Experiment Stages
 
-**Stage 1: No Filtering (top_k=999)**
+**Stage 1: No Filtering (top_k=8, keep all groups)**
 
 Isolates the intrinsic benefit of each algorithm:
 - `GRPO-NoFilter`: Baseline
@@ -106,6 +108,7 @@ Isolates the intrinsic benefit of each algorithm:
 Tests interaction with hard filtering:
 - `GRPO-Filter0.5`: GRPO with 50% filtering
 - `DrGRPO-Filter0.5`: Dr. GRPO with 50% filtering
+- `DrGRPO-Soft-Filter0.5`: Dr. GRPO + soft reweighting with 50% filtering
 
 ### Expected Outcomes
 - Stage 1 answers: "Does Dr. GRPO/Soft provide benefits without filtering?"
