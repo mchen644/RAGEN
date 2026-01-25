@@ -119,7 +119,7 @@ run_exps_for_algo() {
     echo "========================================"
 
     # 1. Baseline: No Filtering
-    local base_exp_name="soko_3b_${alg_name}_${metric}_nofilter"
+    local base_exp_name="soko_3b_${alg_name}_nofilter"
     mkdir -p "${OUTPUT_DIR}/${base_exp_name}"
     if grep -q "^${base_exp_name}$" "$DONE_LIST"; then
         echo "Skipping ${base_exp_name} (Already in done-list)"
