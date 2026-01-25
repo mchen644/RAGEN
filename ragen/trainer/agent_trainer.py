@@ -245,6 +245,7 @@ class RayAgentTrainer(VerlRayPPOTrainer):
         self.first_10_steps_variances = []
         self.base_variance = None
         self.consecutive_variances = collections.deque(maxlen=10)
+        self.consecutive_low_success = collections.defaultdict(int)
         self.early_stopped = False
 
         
@@ -912,6 +913,24 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                         if is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
+
+                    # Success-based early stopping logic
+                    for key, value in val_metrics.items():
+                        if key.startswith("val-env/") and key.endswith("/success"):
+                            if value < 0.01:
+                                self.consecutive_low_success[key] += 1
+                            else:
+                                self.consecutive_low_success[key] = 0
+                            
+                            if self.consecutive_low_success[key] >= 5:
+                                print(f"\n[Early Stopping] Model failed to reach 1% success on {key} for 5 consecutive steps.")
+                                self.early_stopped = True
+                                break
+                    
+                    if self.early_stopped:
+                        metrics.update({"train/early_stopped": 1.0})
+                        logger.log(data=metrics, step=self.global_steps)
+                        break
 
                 if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
                     with marked_timer("save_checkpoint", timing_raw):

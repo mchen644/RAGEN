@@ -33,8 +33,22 @@ We have implemented three strategies to filter rollout groups based on their rew
     ```
 -   **Behavior**: A simple sorting and slicing operation.
 
+### `top_f`
+-   **Description**: Selects the top `f` fraction of groups with the highest (or lowest) scores. For example, `value=0.5` would keep the top 50% of groups.
+-   **Configuration**:
+    ```yaml
+    actor_rollout_ref:
+      rollout:
+        rollout_filter_strategy: top_f
+        rollout_filter_value: 0.5  # Keep top 50% of groups
+    ```
+-   **Behavior**: Groups are sorted by score, and the top `N * value` groups are selected.
+
 ### `min_p`
 -   **Description**: Selects groups whose score is at least a fraction `value` of the maximum score in the batch.
+-   **Behavior**:
+    -   **`largest`**: Keeps groups where $\text{score} \ge \text{max\_score} \cdot \text{value}$.
+    -   **`smallest`**: Keeps groups where $\text{score} \le \text{min\_score} / \text{value}$.
 -   **Configuration**:
     ```yaml
     actor_rollout_ref:
@@ -44,6 +58,7 @@ We have implemented three strategies to filter rollout groups based on their rew
     ```
 
 ### Other Parameters
+-   **`rollout_filter_metric`**: `reward_variance` (default), `reward`, `entropy`, or `entropy_variance`.
 -   **`rollout_filter_type`**: `largest` (default) or `smallest`. Determines if we want high or low scores.
 -   **`rollout_filter_include_zero`**: If `True`, groups with zero score are candidates for filtering. If `False`, they are excluded or handled differently depending on the specific logic (often used to ensure we don't train on complete failures).
 
@@ -97,6 +112,12 @@ The trainer monitors the reward standard deviation (`rollout/in_group_reward_std
 -   **Sliding Window**: Uses a `collections.deque(maxlen=10)` to track the most recent attempts across multiple global steps if retries occur.
 -   **Metric**: Logs `train/early_stopped: 1.0` when triggered.
 
+### 2. Success-Based Early Stopping
+To prevent wasting compute on environments where the model is failing to learn, we implemented an early stopping mechanism based on validation success rates.
+
+- **Condition**: If the success rate for a specific environment (e.g., `val-env/CoordSokoban/success`) remains below **1% (0.01)** for **5 consecutive** validation steps, the training is stopped.
+- **Metric**: Logs `train/early_stopped: 1.0` when triggered.
+
 ---
 
 ## 4. Running Experiments
@@ -137,3 +158,14 @@ Results are saved to `results/` with subdirectories named after the experiment:
 -   **Early Stopping Logic**: `RayAgentTrainer` in `ragen/trainer/agent_trainer.py`
 -   **Loss Scaling Implementation**: `verl/verl/workers/actor/dp_actor.py` (specifically `DataParallelPPOActor.update_policy`)
 -   **Configuration**: `config/base.yaml` and `verl/verl/workers/config/actor.py`
+
+---
+
+## 6. Troubleshooting
+
+### `AssertionError: old_log_probs` Collision
+If you use `rollout_filter_metric=entropy`, you might encounter an `AssertionError` during the `batch.union` operation in `agent_trainer.py`.
+
+-   **Cause**: The `EntropyRolloutFilter` recomputes log probabilities to calculate entropy and returns them in the `DataProto`. The trainer also recomputes log probabilities for the PPO update. `DataProto.union` rejects keys that already exist if they are not the exact same tensor instance.
+-   **Resolution**: The filter has been updated to only include the `entropys` key and prune the redundant `old_log_probs` before unioning with the main batch.
+
