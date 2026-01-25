@@ -145,19 +145,23 @@ class CollapseDetector:
             and turn_counts is not None
         ):
             multi_turn_start = time.perf_counter()
-            turn_prompt_ids, turn_reasoning_ids, _ = self._sample_turn_uniform(
-                all_turns_prompt_ids,
-                all_turns_reasoning_ids,
-                turn_counts,
-                group_ids,
-            )
-            turn_group_ids = np.arange(len(turn_prompt_ids), dtype=int)
-            _safe_compute(
-                "collapse_turn_sample",
-                turn_prompt_ids,
-                turn_reasoning_ids,
-                turn_group_ids,
-            )
+            # NOTE: turn-uniform metrics are temporarily disabled.
+            # Keep the code path for future re-enable without deletion.
+            compute_turn_uniform = False
+            if compute_turn_uniform:
+                turn_prompt_ids, turn_reasoning_ids, _ = self._sample_turn_uniform(
+                    all_turns_prompt_ids,
+                    all_turns_reasoning_ids,
+                    turn_counts,
+                    group_ids,
+                )
+                turn_group_ids = np.arange(len(turn_prompt_ids), dtype=int)
+                _safe_compute(
+                    "collapse_turn_sample",
+                    turn_prompt_ids,
+                    turn_reasoning_ids,
+                    turn_group_ids,
+                )
 
             traj_prompt_ids, traj_reasoning_ids, _ = self._sample_trajectory_uniform(
                 all_turns_prompt_ids,

@@ -14,12 +14,15 @@ COLLAPSE_MULTI_TURN=true
 COLLAPSE_NUM_SAMPLES=128
 
 # GPU settings
-GPUS=(0 1 2 3 4 5 6 7)
+GPUS=()
+GPUS_PROVIDED=false
+GPUS_PER_EXP=1
 COOLDOWN_SECONDS=30
 declare -A GPU_LABELS
 
 usage() {
-    echo "Usage: $0 --model_size 3B [--samples 128] [--steps 1]"
+    echo "Usage: $0 --model_size 3B [--samples 128] [--steps 1] [--gpus 0,1,2,3] [--gpus-per-exp 1]"
+    echo "  --gpus: optional, default auto-detect via nvidia-smi"
     exit 0
 }
 
@@ -49,6 +52,24 @@ while [ $# -gt 0 ]; do
             STEPS="${1#--steps=}"
             shift 1
             ;;
+        --gpus)
+            IFS=',' read -r -a GPUS <<< "$2"
+            GPUS_PROVIDED=true
+            shift 2
+            ;;
+        --gpus=*)
+            IFS=',' read -r -a GPUS <<< "${1#--gpus=}"
+            GPUS_PROVIDED=true
+            shift 1
+            ;;
+        --gpus-per-exp)
+            GPUS_PER_EXP="$2"
+            shift 2
+            ;;
+        --gpus-per-exp=*)
+            GPUS_PER_EXP="${1#--gpus-per-exp=}"
+            shift 1
+            ;;
         -h|--help)
             usage
             ;;
@@ -65,7 +86,45 @@ if [ -z "$MODEL_SIZE" ]; then
 fi
 
 MODEL_PATH="Qwen/Qwen2.5-${MODEL_SIZE}-Instruct"
-NUM_GPUS=${#GPUS[@]}
+
+if [ "$GPUS_PROVIDED" = false ]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$GPU_COUNT" =~ ^[0-9]+$ ]] && [ "$GPU_COUNT" -gt 0 ]; then
+            GPUS=()
+            for ((i=0; i<GPU_COUNT; i++)); do
+                GPUS+=("$i")
+            done
+        fi
+    fi
+    if [ ${#GPUS[@]} -eq 0 ]; then
+        echo "Warning: failed to auto-detect GPUs, falling back to 0-7" >&2
+        GPUS=(0 1 2 3 4 5 6 7)
+    fi
+fi
+
+if ! [[ "$GPUS_PER_EXP" =~ ^[0-9]+$ ]] || [ "$GPUS_PER_EXP" -lt 1 ]; then
+    echo "Error: --gpus-per-exp must be a positive integer"
+    exit 1
+fi
+if (( ${#GPUS[@]} < GPUS_PER_EXP )); then
+    echo "Error: --gpus-per-exp (${GPUS_PER_EXP}) exceeds available GPUs (${#GPUS[@]})"
+    exit 1
+fi
+if (( ${#GPUS[@]} % GPUS_PER_EXP != 0 )); then
+    echo "Error: GPU count (${#GPUS[@]}) must be divisible by --gpus-per-exp (${GPUS_PER_EXP})"
+    exit 1
+fi
+
+GPU_GROUPS=()
+for ((i=0; i<${#GPUS[@]}; i+=GPUS_PER_EXP)); do
+    group="${GPUS[$i]}"
+    for ((j=1; j<GPUS_PER_EXP; j++)); do
+        group+=",${GPUS[$((i+j))]}"
+    done
+    GPU_GROUPS+=("$group")
+done
+NUM_SLOTS=${#GPU_GROUPS[@]}
 
 short_gpu_name() {
     local name="$1"
@@ -134,8 +193,8 @@ LOG_FILE="${LOG_BASENAME}.log"
 RESULT_DIR="logs/${LOG_BASENAME}"
 
 echo "=== RAGEN Profiling for $MODEL_SIZE: $(date) ===" | tee $LOG_FILE
-echo "GPU: 1x${GPU_MODEL_LABEL} | Model Size: ${MODEL_SIZE} | Steps: ${STEPS} | Collapse: first_turn=${COLLAPSE_FIRST_TURN}, multi_turn=${COLLAPSE_MULTI_TURN}, num_samples=${COLLAPSE_NUM_SAMPLES}" | tee -a $LOG_FILE
-echo "GPUS: ${GPUS[*]} | cooldown=${COOLDOWN_SECONDS}s" | tee -a $LOG_FILE
+echo "GPU per exp: ${GPUS_PER_EXP}x${GPU_MODEL_LABEL} | Model Size: ${MODEL_SIZE} | Steps: ${STEPS} | Collapse: first_turn=${COLLAPSE_FIRST_TURN}, multi_turn=${COLLAPSE_MULTI_TURN}, num_samples=${COLLAPSE_NUM_SAMPLES}" | tee -a $LOG_FILE
+echo "GPUS: ${GPUS[*]} | groups: ${GPU_GROUPS[*]} | cooldown=${COOLDOWN_SECONDS}s" | tee -a $LOG_FILE
 
 
 # Algorithm parameters
@@ -150,7 +209,9 @@ run_experiment() {
     local filter=$3
     local think=$4
     local config=$5
-    local gpu_id=$6
+    local gpu_list=$6
+    shift 6
+    local extra_args=("$@")
     local think_label="yes"
     local think_name="thinking"
     if [ "$think" = "False" ]; then
@@ -158,22 +219,24 @@ run_experiment() {
         think_name="nothink"
     fi
     local name="${task}-${algo}-${filter}-${MODEL_SIZE}-${think_name}"
+    IFS=',' read -r -a gpu_ids <<< "$gpu_list"
+    local gpus_per_exp=${#gpu_ids[@]}
 
     START=$(date +%s)
-    CUDA_VISIBLE_DEVICES="${gpu_id}" python train.py --config-name $config \
+    CUDA_VISIBLE_DEVICES="${gpu_list}" python train.py --config-name $config \
         model_path="${MODEL_PATH}" \
         trainer.total_training_steps=${STEPS} \
         trainer.experiment_name=${name} \
         trainer.logger="['console']" \
         trainer.val_before_train=False \
         trainer.save_freq=-1 \
-        trainer.n_gpus_per_node=1 \
-        system.CUDA_VISIBLE_DEVICES="${gpu_id}" \
+        trainer.n_gpus_per_node=${gpus_per_exp} \
+        system.CUDA_VISIBLE_DEVICES="'${gpu_list}'" \
         agent_proxy.enable_think=${think} \
         collapse_detection.first_turn_enabled=${COLLAPSE_FIRST_TURN} \
         collapse_detection.multi_turn_enabled=${COLLAPSE_MULTI_TURN} \
         collapse_detection.num_samples=${COLLAPSE_NUM_SAMPLES} \
-        ${@:7} 2>&1 | tee "logs/${name}.log"
+        "${extra_args[@]}" 2>&1 | tee "logs/${name}.log"
     EXIT_CODE=${PIPESTATUS[0]} 
     END=$(date +%s)
 
@@ -202,7 +265,7 @@ run_experiment() {
 
     # Store result for grouped summary
     local gpu_label
-    gpu_label=$(get_gpu_label "$gpu_id")
+    gpu_label=$(get_gpu_label_for_list "$gpu_list")
     local summary_line="task=${task} | algo=${algo} | filter=${filter} | model=${MODEL_SIZE} | thinking=${think_label} | steps=${STEPS} | collapse=first:${COLLAPSE_FIRST_TURN},multi:${COLLAPSE_MULTI_TURN},samples:${COLLAPSE_NUM_SAMPLES} | train_time=${TRAIN_TIME}s | eval_time=${EVAL_TIME}s | collapse_time=${COLLAPSE_TIME}s | collapse_first_time=${COLLAPSE_FIRST_TIME}s | collapse_multi_time=${COLLAPSE_MULTI_TIME}s | total_time=${TOTAL_TIME_METRIC}s | wall_time=${TOTAL_TIME}s | gpu=${gpu_label} | status=${STATUS}"
     echo "${summary_line}" > "${RESULT_DIR}/${name}.result"
     echo "${summary_line}" | tee -a "$LOG_FILE"
@@ -281,13 +344,36 @@ add_experiment bandit PPO no_filter False _1_bandit $PPO_NO_FILTER
 add_experiment sokoban PPO no_filter False _2_sokoban $PPO_NO_FILTER
 add_experiment frozenlake PPO no_filter False _3_frozen_lake $PPO_NO_FILTER
 
-run_queue_for_gpu() {
-    local gpu_id=$1
+get_gpu_label_for_list() {
+    local gpu_list="$1"
+    IFS=',' read -r -a ids <<< "$gpu_list"
+    local count=${#ids[@]}
+    if [ "$count" -eq 0 ]; then
+        echo "0xGPU"
+        return
+    fi
+    local first_model
+    first_model="$(get_gpu_label "${ids[0]}")"
+    first_model="${first_model#1x}"
+    local id model
+    for id in "${ids[@]:1}"; do
+        model="$(get_gpu_label "$id")"
+        model="${model#1x}"
+        if [ "$model" != "$first_model" ]; then
+            echo "${count}xmixed"
+            return
+        fi
+    done
+    echo "${count}x${first_model}"
+}
+
+run_queue_for_slot() {
+    local gpu_list=$1
     local slot=$2
     local -a indices=()
     local i
     for i in "${!EXPERIMENTS[@]}"; do
-        if (( i % NUM_GPUS == slot )); then
+        if (( i % NUM_SLOTS == slot )); then
             indices+=("$i")
         fi
     done
@@ -298,9 +384,9 @@ run_queue_for_gpu() {
         local exp="${EXPERIMENTS[${indices[$j]}]}"
         IFS='|' read -r exp_group task algo filter think config extra <<< "$exp"
         if [ -n "$extra" ]; then
-            run_experiment "$task" "$algo" "$filter" "$think" "$config" "$gpu_id" $extra
+            run_experiment "$task" "$algo" "$filter" "$think" "$config" "$gpu_list" $extra
         else
-            run_experiment "$task" "$algo" "$filter" "$think" "$config" "$gpu_id"
+            run_experiment "$task" "$algo" "$filter" "$think" "$config" "$gpu_list"
         fi
         if (( j + 1 < total )); then
             sleep "$COOLDOWN_SECONDS"
@@ -309,8 +395,8 @@ run_queue_for_gpu() {
 }
 
 pids=()
-for idx in "${!GPUS[@]}"; do
-    run_queue_for_gpu "${GPUS[$idx]}" "$idx" &
+for idx in "${!GPU_GROUPS[@]}"; do
+    run_queue_for_slot "${GPU_GROUPS[$idx]}" "$idx" &
     pids+=("$!")
 done
 
@@ -321,7 +407,7 @@ done
 {
     echo ""
     echo "=== Grouped Summary ==="
-    echo "GPU: 1x${GPU_MODEL_LABEL} | Model Size: ${MODEL_SIZE} | Steps: ${STEPS} | Collapse: first_turn=${COLLAPSE_FIRST_TURN}, multi_turn=${COLLAPSE_MULTI_TURN}, num_samples=${COLLAPSE_NUM_SAMPLES}"
+    echo "GPU per exp: ${GPUS_PER_EXP}x${GPU_MODEL_LABEL} | Model Size: ${MODEL_SIZE} | Steps: ${STEPS} | Collapse: first_turn=${COLLAPSE_FIRST_TURN}, multi_turn=${COLLAPSE_MULTI_TURN}, num_samples=${COLLAPSE_NUM_SAMPLES}"
     for group_label in "${GROUP_LABELS[@]}"; do
         echo "=== ${group_label} ==="
         for exp in "${EXPERIMENTS[@]}"; do
