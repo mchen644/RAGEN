@@ -15,6 +15,7 @@ STEPS=50
 MODEL_SIZE="3B"
 MODEL_PATH="Qwen/Qwen2.5-${MODEL_SIZE}-Instruct"
 CONFIG="_2_sokoban"
+ROLLOUT_FILTER_STRATEGY="top_p"
 
 # Batch settings: prompt_batch_size=8, samples_per_prompt=16
 ENV_GROUPS=8
@@ -71,13 +72,25 @@ while [ $# -gt 0 ]; do
             STEPS="${1#--steps=}"
             shift 1
             ;;
+        --rollout_filter_strategy)
+            if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+                echo "Error: --rollout_filter_strategy requires a value like top_p|top_k|min_p|top_f"
+                exit 1
+            fi
+            ROLLOUT_FILTER_STRATEGY="$2"
+            shift 2
+            ;;
+        --rollout_filter_strategy=*)
+            ROLLOUT_FILTER_STRATEGY="${1#--rollout_filter_strategy=}"
+            shift 1
+            ;;
         -h|--help)
-            echo "Usage: $0 [--groups 1,2,3] [--kl-type kl|mse|low_var_kl] [--steps N]"
+            echo "Usage: $0 [--groups 1,2,3] [--kl-type kl|mse|low_var_kl] [--steps N] [--rollout_filter_strategy top_p|top_k|min_p|top_f]"
             exit 0
             ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: $0 [--groups 1,2,3] [--kl-type kl|mse|low_var_kl] [--steps N]"
+            echo "Usage: $0 [--groups 1,2,3] [--kl-type kl|mse|low_var_kl] [--steps N] [--rollout_filter_strategy top_p|top_k|min_p|top_f]"
             exit 1
             ;;
     esac
@@ -86,6 +99,7 @@ done
 # normalize spaces if user passes "1, 4" etc.
 GROUP_SET="${GROUP_SET//[[:space:]]/}"
 KL_LOSS_TYPE="${KL_LOSS_TYPE//[[:space:]]/}"
+ROLLOUT_FILTER_STRATEGY="${ROLLOUT_FILTER_STRATEGY//[[:space:]]/}"
 
 IFS=',' read -r -a GROUP_LIST <<< "$GROUP_SET"
 
@@ -101,7 +115,7 @@ has_group() {
 }
 
 # Collapse detection settings (multi-turn only)
-COLLAPSE_FIRST_TURN=false
+COLLAPSE_FIRST_TURN=true
 COLLAPSE_MULTI_TURN=true
 COLLAPSE_NUM_SAMPLES=64
 if [ "$COLLAPSE_FIRST_TURN" = true ] && [ "$COLLAPSE_MULTI_TURN" = true ]; then
@@ -114,8 +128,12 @@ else
     COLLAPSE_TAG="nocd"
 fi
 
-LOG_FILE="${LOG_BASE}_${KL_LOSS_TYPE}_${COLLAPSE_TAG}.log"
+LOG_DIR="logs/smoke_test_${ROLLOUT_FILTER_STRATEGY}"
+LOG_DETAIL_DIR="logs/smoke_test_${ROLLOUT_FILTER_STRATEGY}_details"
+LOG_FILE="${LOG_DIR}/${LOG_BASE}_${KL_LOSS_TYPE}_${COLLAPSE_TAG}.log"
 
+mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DETAIL_DIR"
 if [ ! -f "$LOG_FILE" ]; then
     echo "=== Smoke Test for $MODEL_SIZE on B200: $(date) ===" | tee "$LOG_FILE"
 else
@@ -154,11 +172,16 @@ run_experiment() {
     if [ "$kl_coef" != "0" ]; then
         use_kl_loss="True"
     fi
+    # top_k expects an integer count of groups; scale ratio by env_groups
+    local filter_value="$filter_ratio"
+    if [ "$ROLLOUT_FILTER_STRATEGY" = "top_k" ]; then
+        filter_value=$(awk -v r="$filter_ratio" -v g="$ENV_GROUPS" 'BEGIN{v=int(r*g); if(v<1) v=1; print v}')
+    fi
 
     START=$(date +%s)
     WANDB_MODE=offline WANDB_CONSOLE=off CUDA_VISIBLE_DEVICES="${gpu_id}" python train.py --config-name $CONFIG \
         model_path="${MODEL_PATH}" \
-        trainer.project_name="ragen-smoke_test" \
+        trainer.project_name="ragen-smoke_test_${ROLLOUT_FILTER_STRATEGY}" \
         trainer.total_training_steps=${STEPS} \
         trainer.experiment_name=${name} \
         trainer.logger="['console','wandb']" \
@@ -179,22 +202,23 @@ run_experiment() {
         actor_rollout_ref.actor.kl_loss_type=${kl_loss_type} \
         actor_rollout_ref.actor.entropy_coeff=${entropy_coef} \
         actor_rollout_ref.actor.filter_loss_scaling="sqrt" \
-        actor_rollout_ref.rollout.rollout_filter_value=${filter_ratio} \
+        actor_rollout_ref.rollout.rollout_filter_value=${filter_value} \
+        actor_rollout_ref.rollout.rollout_filter_strategy=${ROLLOUT_FILTER_STRATEGY} \
         es_manager.train.env_groups=${ENV_GROUPS} \
         es_manager.train.group_size=${GROUP_SIZE} \
-        2>&1 | tee "logs/${name}.log"
+        2>&1 | tee "${LOG_DETAIL_DIR}/${name}.log"
     EXIT_CODE=${PIPESTATUS[0]}
     END=$(date +%s)
 
     TOTAL_TIME=$((END - START))
 
     # Extract timing from log
-    TRAIN_TIME_RAW=$(grep -oP 'timing_s/train_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
-    EVAL_TIME_RAW=$(grep -oP 'timing_s/eval_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
-    TOTAL_TIME_RAW=$(grep -oP 'timing_s/total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
-    COLLAPSE_TIME_RAW=$(grep -oP 'timing_s/collapse_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
-    COLLAPSE_FIRST_TIME_RAW=$(grep -oP 'timing_s/collapse_first_turn_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
-    COLLAPSE_MULTI_TIME_RAW=$(grep -oP 'timing_s/collapse_multi_turn_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
+    TRAIN_TIME_RAW=$(grep -oP 'timing_s/train_total[:\s]+\K[\d.]+' "${LOG_DETAIL_DIR}/${name}.log" | tail -1 || echo "")
+    EVAL_TIME_RAW=$(grep -oP 'timing_s/eval_total[:\s]+\K[\d.]+' "${LOG_DETAIL_DIR}/${name}.log" | tail -1 || echo "")
+    TOTAL_TIME_RAW=$(grep -oP 'timing_s/total[:\s]+\K[\d.]+' "${LOG_DETAIL_DIR}/${name}.log" | tail -1 || echo "")
+    COLLAPSE_TIME_RAW=$(grep -oP 'timing_s/collapse_total[:\s]+\K[\d.]+' "${LOG_DETAIL_DIR}/${name}.log" | tail -1 || echo "")
+    COLLAPSE_FIRST_TIME_RAW=$(grep -oP 'timing_s/collapse_first_turn_total[:\s]+\K[\d.]+' "${LOG_DETAIL_DIR}/${name}.log" | tail -1 || echo "")
+    COLLAPSE_MULTI_TIME_RAW=$(grep -oP 'timing_s/collapse_multi_turn_total[:\s]+\K[\d.]+' "${LOG_DETAIL_DIR}/${name}.log" | tail -1 || echo "")
     TRAIN_TIME=$([ -n "$TRAIN_TIME_RAW" ] && printf "%.2f" "$TRAIN_TIME_RAW" || echo "N/A")
     EVAL_TIME=$([ -n "$EVAL_TIME_RAW" ] && printf "%.2f" "$EVAL_TIME_RAW" || echo "N/A")
     TOTAL_TIME_METRIC=$([ -n "$TOTAL_TIME_RAW" ] && printf "%.2f" "$TOTAL_TIME_RAW" || echo "N/A")
@@ -206,10 +230,10 @@ run_experiment() {
         STATUS="success"
     else
         STATUS="fail"
-        ERROR=$(tail -2 "logs/${name}.log" | tr '\n' ' ')
+        ERROR=$(tail -2 "${LOG_DETAIL_DIR}/${name}.log" | tr '\n' ' ')
     fi
 
-    echo "${name} | filter=${filter_ratio} | kl=${kl_coef} | entropy=${entropy_coef} | collapse=first:${COLLAPSE_FIRST_TURN},multi:${COLLAPSE_MULTI_TURN},samples:${COLLAPSE_NUM_SAMPLES} | train_time=${TRAIN_TIME}s | eval_time=${EVAL_TIME}s | collapse_time=${COLLAPSE_TIME}s | collapse_first_time=${COLLAPSE_FIRST_TIME}s | collapse_multi_time=${COLLAPSE_MULTI_TIME}s | total_time=${TOTAL_TIME_METRIC}s | wall_time=${TOTAL_TIME}s | gpu=${gpu_id} | status=${STATUS}" | tee -a $LOG_FILE
+    echo "${name} | filter=${filter_value} | kl=${kl_coef} | entropy=${entropy_coef} | collapse=first:${COLLAPSE_FIRST_TURN},multi:${COLLAPSE_MULTI_TURN},samples:${COLLAPSE_NUM_SAMPLES} | train_time=${TRAIN_TIME}s | eval_time=${EVAL_TIME}s | collapse_time=${COLLAPSE_TIME}s | collapse_first_time=${COLLAPSE_FIRST_TIME}s | collapse_multi_time=${COLLAPSE_MULTI_TIME}s | total_time=${TOTAL_TIME_METRIC}s | wall_time=${TOTAL_TIME}s | gpu=${gpu_id} | status=${STATUS}" | tee -a $LOG_FILE
     [ "$STATUS" = "fail" ] && echo "  error: ${ERROR}" | tee -a $LOG_FILE
     echo "" | tee -a $LOG_FILE
 }
