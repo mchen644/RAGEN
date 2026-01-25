@@ -11,8 +11,7 @@ cd RAGEN
 conda create -n ragen python=3.12 -y
 conda activate ragen
 
-# Switch to the update_verl branch and init submodules
-git switch update_verl
+# Init submodules
 git submodule update --init --recursive
 ```
 
