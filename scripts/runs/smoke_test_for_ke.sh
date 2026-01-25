@@ -158,7 +158,7 @@ run_experiment() {
     START=$(date +%s)
     WANDB_MODE=offline WANDB_CONSOLE=off CUDA_VISIBLE_DEVICES="${gpu_id}" python train.py --config-name $CONFIG \
         model_path="${MODEL_PATH}" \
-        trainer.project_name="ragen-smoke-test" \
+        trainer.project_name="ragen-smoke_test" \
         trainer.total_training_steps=${STEPS} \
         trainer.experiment_name=${name} \
         trainer.logger="['console','wandb']" \
@@ -193,10 +193,14 @@ run_experiment() {
     EVAL_TIME_RAW=$(grep -oP 'timing_s/eval_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
     TOTAL_TIME_RAW=$(grep -oP 'timing_s/total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
     COLLAPSE_TIME_RAW=$(grep -oP 'timing_s/collapse_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
+    COLLAPSE_FIRST_TIME_RAW=$(grep -oP 'timing_s/collapse_first_turn_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
+    COLLAPSE_MULTI_TIME_RAW=$(grep -oP 'timing_s/collapse_multi_turn_total[:\s]+\K[\d.]+' "logs/${name}.log" | tail -1 || echo "")
     TRAIN_TIME=$([ -n "$TRAIN_TIME_RAW" ] && printf "%.2f" "$TRAIN_TIME_RAW" || echo "N/A")
     EVAL_TIME=$([ -n "$EVAL_TIME_RAW" ] && printf "%.2f" "$EVAL_TIME_RAW" || echo "N/A")
     TOTAL_TIME_METRIC=$([ -n "$TOTAL_TIME_RAW" ] && printf "%.2f" "$TOTAL_TIME_RAW" || echo "N/A")
     COLLAPSE_TIME=$([ -n "$COLLAPSE_TIME_RAW" ] && printf "%.2f" "$COLLAPSE_TIME_RAW" || echo "N/A")
+    COLLAPSE_FIRST_TIME=$([ -n "$COLLAPSE_FIRST_TIME_RAW" ] && printf "%.2f" "$COLLAPSE_FIRST_TIME_RAW" || echo "N/A")
+    COLLAPSE_MULTI_TIME=$([ -n "$COLLAPSE_MULTI_TIME_RAW" ] && printf "%.2f" "$COLLAPSE_MULTI_TIME_RAW" || echo "N/A")
 
     if [ $EXIT_CODE -eq 0 ]; then
         STATUS="success"
@@ -205,7 +209,7 @@ run_experiment() {
         ERROR=$(tail -2 "logs/${name}.log" | tr '\n' ' ')
     fi
 
-    echo "${name} | filter=${filter_ratio} | kl=${kl_coef} | entropy=${entropy_coef} | collapse=first:${COLLAPSE_FIRST_TURN},multi:${COLLAPSE_MULTI_TURN},samples:${COLLAPSE_NUM_SAMPLES} | train_time=${TRAIN_TIME}s | eval_time=${EVAL_TIME}s | collapse_time=${COLLAPSE_TIME}s | total_time=${TOTAL_TIME_METRIC}s | wall_time=${TOTAL_TIME}s | gpu=${gpu_id} | status=${STATUS}" | tee -a $LOG_FILE
+    echo "${name} | filter=${filter_ratio} | kl=${kl_coef} | entropy=${entropy_coef} | collapse=first:${COLLAPSE_FIRST_TURN},multi:${COLLAPSE_MULTI_TURN},samples:${COLLAPSE_NUM_SAMPLES} | train_time=${TRAIN_TIME}s | eval_time=${EVAL_TIME}s | collapse_time=${COLLAPSE_TIME}s | collapse_first_time=${COLLAPSE_FIRST_TIME}s | collapse_multi_time=${COLLAPSE_MULTI_TIME}s | total_time=${TOTAL_TIME_METRIC}s | wall_time=${TOTAL_TIME}s | gpu=${gpu_id} | status=${STATUS}" | tee -a $LOG_FILE
     [ "$STATUS" = "fail" ] && echo "  error: ${ERROR}" | tee -a $LOG_FILE
     echo "" | tee -a $LOG_FILE
 }

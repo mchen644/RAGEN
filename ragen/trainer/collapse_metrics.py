@@ -12,6 +12,7 @@ not the true p(x). This is exactly what's needed for diagnosing template collaps
 from __future__ import annotations
 
 import math
+import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -107,6 +108,8 @@ class CollapseDetector:
         turn_counts = batch.non_tensor_batch.get("turn_counts")
 
         metrics: Dict[str, float] = {}
+        multi_turn_time = 0.0
+        first_turn_time = 0.0
 
         # Report valid thinking rate from all turns if available.
         total_turn_counts = batch.non_tensor_batch.get("turn_counts_total")
@@ -141,6 +144,7 @@ class CollapseDetector:
             and all_turns_reasoning_ids is not None
             and turn_counts is not None
         ):
+            multi_turn_start = time.perf_counter()
             turn_prompt_ids, turn_reasoning_ids, _ = self._sample_turn_uniform(
                 all_turns_prompt_ids,
                 all_turns_reasoning_ids,
@@ -168,8 +172,10 @@ class CollapseDetector:
                 traj_reasoning_ids,
                 traj_group_ids,
             )
+            multi_turn_time = time.perf_counter() - multi_turn_start
 
         if self.first_turn_enabled:
+            first_turn_start = time.perf_counter()
             # First-turn sampling: always compute when data is available.
             first_turn_prompt_ids = batch.non_tensor_batch.get("first_turn_prompt_ids")
             first_turn_reasoning_ids = batch.non_tensor_batch.get("first_turn_reasoning_ids")
@@ -178,33 +184,38 @@ class CollapseDetector:
                     raise ValueError(
                         "Collapse metrics require first_turn_prompt_ids and first_turn_reasoning_ids."
                     )
-                return metrics
+            else:
+                first_turn_reasoning_list = (
+                    list(first_turn_reasoning_ids)
+                    if isinstance(first_turn_reasoning_ids, np.ndarray)
+                    else first_turn_reasoning_ids
+                )
+                first_turn_valid_indices = self._get_valid_reasoning_indices(first_turn_reasoning_list)
+                first_turn_total = len(first_turn_reasoning_list)
+                first_turn_valid = len(first_turn_valid_indices)
+                metrics["collapse/first_turn_num_total"] = first_turn_total
+                metrics["collapse/first_turn_num_valid"] = first_turn_valid
+                metrics["collapse/first_turn_valid_rate"] = (
+                    (first_turn_valid / first_turn_total) if first_turn_total > 0 else 0.0
+                )
 
-            first_turn_reasoning_list = (
-                list(first_turn_reasoning_ids)
-                if isinstance(first_turn_reasoning_ids, np.ndarray)
-                else first_turn_reasoning_ids
-            )
-            first_turn_valid_indices = self._get_valid_reasoning_indices(first_turn_reasoning_list)
-            first_turn_total = len(first_turn_reasoning_list)
-            first_turn_valid = len(first_turn_valid_indices)
-            metrics["collapse/first_turn_num_total"] = first_turn_total
-            metrics["collapse/first_turn_num_valid"] = first_turn_valid
-            metrics["collapse/first_turn_valid_rate"] = (
-                (first_turn_valid / first_turn_total) if first_turn_total > 0 else 0.0
-            )
+                first_prompt_ids, first_reasoning_ids, first_group_ids = self._sample_first_turn_pairs(
+                    first_turn_prompt_ids,
+                    first_turn_reasoning_ids,
+                    group_ids,
+                )
+                _safe_compute(
+                    "collapse_first_turn_sample",
+                    first_prompt_ids,
+                    first_reasoning_ids,
+                    first_group_ids,
+                )
+            first_turn_time = time.perf_counter() - first_turn_start
 
-            first_prompt_ids, first_reasoning_ids, first_group_ids = self._sample_first_turn_pairs(
-                first_turn_prompt_ids,
-                first_turn_reasoning_ids,
-                group_ids,
-            )
-            _safe_compute(
-                "collapse_first_turn_sample",
-                first_prompt_ids,
-                first_reasoning_ids,
-                first_group_ids,
-            )
+        if self.multi_turn_enabled:
+            metrics["timing_s/collapse_multi_turn_step"] = multi_turn_time
+        if self.first_turn_enabled:
+            metrics["timing_s/collapse_first_turn_step"] = first_turn_time
 
         return metrics
 

@@ -614,6 +614,8 @@ class RayAgentTrainer(VerlRayPPOTrainer):
         self.train_time_total = 0.0
         self.eval_time_total = 0.0
         self.collapse_time_total = 0.0
+        self.collapse_first_turn_time_total = 0.0
+        self.collapse_multi_turn_time_total = 0.0
         for step in range(self.total_training_steps):
             # metrics = {}
             timing_raw = {}
@@ -925,6 +927,10 @@ class RayAgentTrainer(VerlRayPPOTrainer):
             self.train_time_total += train_time
             self.eval_time_total += eval_time
             self.collapse_time_total += collapse_time
+            collapse_first_turn_step = metrics.get("timing_s/collapse_first_turn_step", 0.0)
+            collapse_multi_turn_step = metrics.get("timing_s/collapse_multi_turn_step", 0.0)
+            self.collapse_first_turn_time_total += collapse_first_turn_step
+            self.collapse_multi_turn_time_total += collapse_multi_turn_step
 
             # collect metrics
             metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
@@ -939,6 +945,8 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                 "timing_s/train_total": self.train_time_total,
                 "timing_s/eval_total": self.eval_time_total,
                 "timing_s/collapse_total": self.collapse_time_total,
+                "timing_s/collapse_first_turn_total": self.collapse_first_turn_time_total,
+                "timing_s/collapse_multi_turn_total": self.collapse_multi_turn_time_total,
             })
             # add another timing metric: total time
             metrics.update({"timing_s/total": time.time() - self.start_time})
