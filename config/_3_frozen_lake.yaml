@@ -16,3 +16,9 @@ es_manager:
   val:
     env_configs:
       tags: ["CoordFrozenLake"]
+
+custom_envs:
+  CoordFrozenLake:
+    env_config:
+      success_rate: 0.8 # Probability of moving in the intended direction
+      observation_format: "grid_coord"

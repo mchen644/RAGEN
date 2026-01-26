@@ -203,6 +203,110 @@ class RolloutFilter:
         return metrics
 
 
+class LengthRolloutFilter(RolloutFilter):
+    """Filters rollouts based on response length within groups."""
+
+    _METRIC_OPTIONS = {"length"}
+
+    def __init__(self, config: RolloutFilterConfig) -> None:
+        super().__init__(config)
+        if config.metric not in self._METRIC_OPTIONS:
+            raise ValueError(
+                f"LengthRolloutFilter only supports metrics {self._METRIC_OPTIONS}, got {config.metric}"
+            )
+
+    def filter(self, batch: DataProto) -> Tuple[DataProto, Dict[str, torch.Tensor]]:
+        num_groups = self.num_groups
+        response_mask = batch.batch.get("response_mask")
+        if response_mask is None:
+            response_mask = batch.batch.get("loss_mask")
+        if response_mask is None:
+            raise ValueError("LengthRolloutFilter requires response_mask or loss_mask in the batch")
+
+        # Calculate length per trajectory
+        length_per_traj = response_mask.sum(dim=-1).float()
+
+        # Check if this is turn-level mode (single_turn/limited_multi_turn, indicated by episode_ids)
+        has_episode_ids = (
+            batch.non_tensor_batch is not None
+            and "episode_ids" in batch.non_tensor_batch
+        )
+
+        if has_episode_ids:
+            # Turn-level mode: aggregate by episode first
+            episode_ids = batch.non_tensor_batch["episode_ids"]
+            unique_episodes = []
+            episode_to_indices = {}
+            for i, eid in enumerate(episode_ids):
+                if eid not in episode_to_indices:
+                    unique_episodes.append(eid)
+                    episode_to_indices[eid] = []
+                episode_to_indices[eid].append(i)
+
+            # Get episode-level length (sum of all turns)
+            num_episodes = len(unique_episodes)
+            episode_length = torch.zeros(num_episodes, device=length_per_traj.device)
+            for i, eid in enumerate(unique_episodes):
+                indices = episode_to_indices[eid]
+                episode_length[i] = length_per_traj[indices].sum()
+
+            group_size = num_episodes // num_groups
+            if num_episodes % num_groups != 0:
+                raise ValueError(
+                    f"Number of episodes ({num_episodes}) must be divisible by num_groups ({num_groups})"
+                )
+
+            length_per_group = episode_length.view(num_groups, group_size)
+        else:
+            actual_batch_size = length_per_traj.shape[0]
+            group_size = actual_batch_size // num_groups
+            length_per_group = length_per_traj.view(num_groups, group_size)
+
+        in_group_std = length_per_group.std(dim=-1)
+        in_group_max = length_per_group.max(dim=-1).values
+        in_group_mean = length_per_group.mean(dim=-1)
+
+        # For length, we usually use mean length for filtering
+        selection_scores = in_group_mean
+        top_groups = self._select_top_groups(selection_scores)
+
+        metrics = self._build_base_metrics(in_group_std, in_group_max, in_group_mean, top_groups)
+        metrics.update(
+            {
+                "rollout/in_group_length_std": in_group_std.mean(),
+                "rollout/in_group_length_max": in_group_max.mean(),
+                "rollout/in_group_length_mean": in_group_mean.mean(),
+                "rollout/chosen_in_group_length_std": in_group_std[top_groups].mean(),
+                "rollout/chosen_in_group_length_max": in_group_max[top_groups].mean(),
+                "rollout/chosen_in_group_length_mean": in_group_mean[top_groups].mean(),
+                "rollout/filter_kept_count": torch.tensor(float(top_groups.numel())),
+                "rollout/filter_kept_ratio": torch.tensor(top_groups.numel() / self.num_groups),
+                "rollout/filter_zero_count": (torch.abs(selection_scores) <= 1e-10).sum(),
+            }
+        )
+
+        if self.strategy == "top_p" and self.config.value >= 1 and self.config.include_zero:
+            return batch, metrics
+
+        if has_episode_ids:
+            selected_episodes = set()
+            for gid in top_groups.cpu().tolist():
+                start_ep = gid * group_size
+                end_ep = start_ep + group_size
+                for ep_idx in range(start_ep, end_ep):
+                    selected_episodes.add(unique_episodes[ep_idx])
+
+            mask = torch.tensor(
+                [episode_ids[i] in selected_episodes for i in range(len(episode_ids))],
+                dtype=torch.bool
+            )
+        else:
+            mask = self._groups_to_mask(top_groups, group_size)
+
+        batch = self._apply_mask(batch, mask)
+        return batch, metrics
+
+
 class RewardRolloutFilter(RolloutFilter):
     """Filters rollouts based on reward statistics within groups."""
 
@@ -481,6 +585,8 @@ def build_rollout_filter(
         strategy=strategy,
     )
 
+    if metric == "length":
+        return LengthRolloutFilter(config)
     if metric in {"reward", "reward_variance"}:
         return RewardRolloutFilter(config)
     if metric in {"entropy", "entropy_variance"}:

@@ -250,7 +250,7 @@ class RayAgentTrainer(VerlRayPPOTrainer):
         # Early stopping state
         self.first_10_steps_variances = []
         self.base_variance = None
-        self.consecutive_variances = collections.deque(maxlen=10)
+        self.consecutive_variances = collections.deque(maxlen=5)
         self.consecutive_low_success = collections.defaultdict(int)
         self.early_stopped = False
 
@@ -682,7 +682,7 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                                 current_var = current_var.item()
                             self.consecutive_variances.append(current_var)
                             
-                            if self.base_variance is not None and len(self.consecutive_variances) == 10:
+                            if self.base_variance is not None and len(self.consecutive_variances) == 5:
                                 if all(v < 0.1 * self.base_variance for v in self.consecutive_variances):
                                     print(f"\n[Early Stopping] Reward variance collapsed!")
                                     print(f"Base variance (mean of first 10 steps): {self.base_variance:.6f}")

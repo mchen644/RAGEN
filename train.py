@@ -141,15 +141,12 @@ def add_dependency_and_validate_config(config):
     rollout_filter_value = getattr(config.actor_rollout_ref.rollout, "rollout_filter_value", 0.25)
     
     # Estimate effective ratio for validation
-    if rollout_filter_strategy == "top_p":
+    if rollout_filter_strategy in ("top_p", "top_k"):
         effective_ratio = rollout_filter_value
-    elif rollout_filter_strategy == "top_k":
+    elif rollout_filter_strategy == "top_k_abs":
         effective_ratio = rollout_filter_value / config.es_manager.train.env_groups
     else:
         # For min_p or others, we can't easily predict. Assume 1.0 for validation or skip.
-        # Let's assume user knows what they are doing and skip strict validation or use a safe bound?
-        # Using 1.0 might hide errors. Using 0.0 will always fail.
-        # Let's use 1.0 and print a warning if we could.
         effective_ratio = 1.0
 
     if context_window_mode in ("single_turn", "limited_multi_turn"):

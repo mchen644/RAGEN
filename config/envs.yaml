@@ -159,7 +159,8 @@ custom_envs:
     max_tokens: 100
     parallel_friendly: false
     max_workers: 32
-    env_config: null
+    env_config:
+      success_rate: 0.8
 
   CoordFrozenLake:
     env_type: frozen_lake
@@ -174,6 +175,7 @@ custom_envs:
     max_workers: 32
     env_config:
       observation_format: "grid_coord"
+      success_rate: 0.8
 
   MetamathQA:
     env_type: metamathqa

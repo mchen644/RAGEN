@@ -58,7 +58,7 @@ We have implemented three strategies to filter rollout groups based on their rew
     ```
 
 ### Other Parameters
--   **`rollout_filter_metric`**: `reward_variance` (default), `reward`, `entropy`, or `entropy_variance`.
+-   **`rollout_filter_metric`**: `reward_variance` (default), `reward`, `entropy`, `entropy_variance`, or `length`.
 -   **`rollout_filter_type`**: `largest` (default) or `smallest`. Determines if we want high or low scores.
 -   **`rollout_filter_include_zero`**: If `True`, groups with zero score are candidates for filtering. If `False`, they are excluded or handled differently depending on the specific logic (often used to ensure we don't train on complete failures).
 
@@ -120,32 +120,28 @@ To prevent wasting compute on environments where the model is failing to learn, 
 
 ---
 
-## 4. Running Experiments
-A unified script `run_filtering_exps.sh` is provided to run grid search experiments.
+A unified script `run_filtering_final.sh` is provided to run the validated set of filtering experiments.
 
 ### Usage
 ```bash
-# Run all experiments (GRPO and PPO)
-./run_filtering_exps.sh all
-
-# Run only GRPO experiments
-./run_filtering_exps.sh grpo
-
-# Run only PPO experiments
-./run_filtering_exps.sh ppo
+# Run experiments across available GPUs (e.g., 2 GPUs per experiment)
+bash run_filtering_final.sh 2
 ```
 
 ### Features
--   **Date Prefix**: All experiment names are prefixed with `MMDD_` (e.g., `0120_`) to organize runs by date.
--   **Baseline**: Automatically runs a "No Filtering" baseline first.
--   **Grid Search**: Iterates over combinations of:
-    -   `rollout_filter_strategy`: `top_p`, `top_k`, `min_p`
-    -   `rollout_filter_value`:
-        - `top_p`: 0.7, 0.85 (Nucleus Sampling)
-        - `top_k`: 0.5, 0.75 (Keep top 50%, 75% of groups)
-        - `top_k_abs`: 4, 6 (Keep top 4, 6 groups)
-        - `min_p`: 0.5, 0.8 (Keep >50%, >80% of max score)
-    -   `rollout_filter_include_zero`: `False` (default for grid)
+-   **PPO Focused**: All experiments in this suite use the PPO algorithm.
+-   **400 Steps**: Standardized training length.
+-   **Auto-Scheduling**: Automatically detects available GPUs and distributes experiments.
+-   **Metric Coverage**: Covers `reward_variance`, `entropy`, `entropy_variance`, and `length`.
+-   **Automatic Skip**: Tracks progress in `filter_final_donelist.txt` to avoid redundant runs.
+
+---
+
+## 5. Legacy Scripts
+The following scripts were used during the initial exploration phase:
+- `run_filtering_exps.sh`: Initial algorithm comparison (GRPO vs PPO).
+- `run_filtering_multigpu.sh`: Batch execution with comma-separated arguments.
+- `run_filtering_pergpu.sh`: Parallel execution on individual GPUs.
 
 ### Directory Structure
 Results are saved to `results/` with subdirectories named after the experiment:
