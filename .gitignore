@@ -69,6 +69,7 @@ local_settings.py
 image_outputs
 
 checkpoints
+model_saving/
 
 # Flask stuff:
 instance/

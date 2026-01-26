@@ -9,6 +9,7 @@ set -euo pipefail
 STEPS=400
 MODEL_NAMES=("Qwen2.5-0.5B" "Qwen2.5-1.5B" "Qwen2.5-3B" "Qwen2.5-7B")
 TASKS=("sokoban" "frozenlake" "webshop" "metamathqa" "countdown")
+SAVE_FREQ=-1
 
 # GPU settings
 GPUS=()
@@ -28,6 +29,7 @@ usage() {
     echo "  --gpus-per-exp N      GPUs per experiment (default: 1)"
     echo "  --cooldown SECONDS    Cooldown between runs on the same GPU group (default: 30)"
     echo "  --gpu-memory-utilization V  Rollout gpu_memory_utilization (default: 0.3)"
+    echo "  --save-freq N         Checkpoint save frequency (default: -1 to disable saving)"
     echo "  -h, --help            Show this help"
     exit 0
 }
@@ -48,6 +50,8 @@ while [ $# -gt 0 ]; do
         --cooldown=*) COOLDOWN_SECONDS="${1#*=}"; shift ;;
         --gpu-memory-utilization) GPU_MEMORY_UTILIZATION="$2"; shift 2 ;;
         --gpu-memory-utilization=*) GPU_MEMORY_UTILIZATION="${1#*=}"; shift ;;
+        --save-freq) SAVE_FREQ="$2"; shift 2 ;;
+        --save-freq=*) SAVE_FREQ="${1#*=}"; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown argument: $1"; usage ;;
     esac
@@ -180,9 +184,11 @@ GPU_MODEL_LABEL=$(get_gpu_model_label)
 GPU_LOG_LABEL="${GPUS_PER_EXP}x${GPU_MODEL_LABEL}"
 LOG_FILE="logs/diff_size_PPO.log"
 RESULT_ROOT="logs"
+CHECKPOINT_ROOT="model_saving/diff_size"
 
 mkdir -p logs
 mkdir -p "$RESULT_ROOT"
+mkdir -p "$CHECKPOINT_ROOT"
 
 echo "=== Model Size Runner (PPO): $(date) ===" | tee "$LOG_FILE"
 echo "Models: ${MODEL_NAMES[*]} | Tasks: ${TASKS[*]} | Steps: ${STEPS} | GPU per exp: ${GPUS_PER_EXP}x${GPU_MODEL_LABEL}" | tee -a "$LOG_FILE"
@@ -230,6 +236,11 @@ run_experiment() {
         env_overrides+=("custom_envs.CoordFrozenLake.env_config.success_rate=1.0")
     fi
 
+    local checkpoint_overrides=(
+        "actor_rollout_ref.actor.checkpoint.save_contents=[model]"
+        "critic.checkpoint.save_contents=[model]"
+    )
+
     # PPO algorithm overrides
     local algo_overrides="algorithm.adv_estimator=gae actor_rollout_ref.actor.loss_agg_mode=token-mean"
     read -r -a algo_args <<< "$algo_overrides"
@@ -237,26 +248,30 @@ run_experiment() {
     local name="${task}-${algo}-${filter}-${model_name}"
     local task_dir="${RESULT_ROOT}/diff_size_${task}"
     local log_path="${task_dir}/${name}.log"
+    local checkpoint_dir="${CHECKPOINT_ROOT}/${task}/${model_name}/${filter}/${name}"
     local gpus_per_exp
     IFS=',' read -r -a gpu_ids <<< "$gpu_list"
     gpus_per_exp=${#gpu_ids[@]}
 
     mkdir -p "$task_dir"
+    mkdir -p "${checkpoint_dir}"
     START=$(date +%s)
     CUDA_VISIBLE_DEVICES="${gpu_list}" python train.py --config-name "$config" \
         model_path="${model_path}" \
         trainer.project_name="ragen_main_table_diff_size" \
         trainer.total_training_steps="${STEPS}" \
         trainer.experiment_name="${name}" \
+        trainer.save_freq="${SAVE_FREQ}" \
+        trainer.default_local_dir="${checkpoint_dir}" \
         trainer.logger="['console','wandb']" \
         trainer.val_before_train=True \
-        trainer.save_freq=-1 \
         trainer.n_gpus_per_node="${gpus_per_exp}" \
         system.CUDA_VISIBLE_DEVICES="'${gpu_list}'" \
         actor_rollout_ref.rollout.rollout_filter_strategy="${filter_strategy}" \
         actor_rollout_ref.rollout.rollout_filter_value="${filter_value}" \
         "${common_overrides[@]}" \
         "${env_overrides[@]}" \
+        "${checkpoint_overrides[@]}" \
         "${algo_args[@]}" \
         2>&1 | tee "$log_path"
     EXIT_CODE=${PIPESTATUS[0]}
