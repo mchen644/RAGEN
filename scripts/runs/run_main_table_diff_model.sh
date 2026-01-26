@@ -1,55 +1,66 @@
 #!/bin/bash
-# Performance table runner (PPO/DAPO/GRPO/DrGRPO × tasks × filter/no-filter)
+# Model Type: Different model types (Instruct/Reasoning) × tasks × filter/no-filter
+# Algorithm: PPO only
 # Filtering rule: filter => top_p=0.9, nofilter => top_p=1.0
 
 set -euo pipefail
 
 # Defaults
 STEPS=400
-MODEL_NAME="Qwen2.5-3B"
-TASKS=("sokoban" "webshop" "frozenlake" "metamathqa" "countdown" )
-MODEL_PATH=""
+MODEL_NAMES=("Qwen2.5-3B-Instruct")
+TASKS=("sokoban" "frozenlake" "webshop" "metamathqa" "countdown")
 
 # GPU settings
 GPUS=()
 GPUS_PROVIDED=false
 GPUS_PER_EXP=1
 COOLDOWN_SECONDS=30
+GPU_MEMORY_UTILIZATION=0.3
 declare -A GPU_LABELS
 
 usage() {
     echo "Usage: $0 [options]"
     echo "Options:"
-    echo "  --model_name NAME     Model name (default: Qwen-2.5-3B)"
-    echo "  --steps N             Training steps (default: 200)"
+    echo "  --steps N             Training steps (default: 400)"
     echo "  --tasks LIST          Comma-separated tasks (default: sokoban,frozenlake,webshop,metamathqa,countdown)"
+    echo "  --models LIST         Comma-separated model names (default: Qwen2.5-3B-Instruct,QwQ-32B)"
     echo "  --gpus LIST           Comma-separated GPU IDs (default: auto-detect)"
     echo "  --gpus-per-exp N      GPUs per experiment (default: 1)"
     echo "  --cooldown SECONDS    Cooldown between runs on the same GPU group (default: 30)"
+    echo "  --gpu-memory-utilization V  Rollout gpu_memory_utilization (default: 0.3)"
     echo "  -h, --help            Show this help"
     exit 0
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --model_name) MODEL_NAME="$2"; shift 2 ;;
-        --model_name=*) MODEL_NAME="${1#*=}"; shift ;;
         --steps) STEPS="$2"; shift 2 ;;
         --steps=*) STEPS="${1#*=}"; shift ;;
         --tasks) IFS=',' read -r -a TASKS <<< "$2"; shift 2 ;;
         --tasks=*) IFS=',' read -r -a TASKS <<< "${1#*=}"; shift ;;
+        --models) IFS=',' read -r -a MODEL_NAMES <<< "$2"; shift 2 ;;
+        --models=*) IFS=',' read -r -a MODEL_NAMES <<< "${1#*=}"; shift ;;
         --gpus) IFS=',' read -r -a GPUS <<< "$2"; GPUS_PROVIDED=true; shift 2 ;;
         --gpus=*) IFS=',' read -r -a GPUS <<< "${1#*=}"; GPUS_PROVIDED=true; shift ;;
         --gpus-per-exp) GPUS_PER_EXP="$2"; shift 2 ;;
         --gpus-per-exp=*) GPUS_PER_EXP="${1#*=}"; shift ;;
         --cooldown) COOLDOWN_SECONDS="$2"; shift 2 ;;
         --cooldown=*) COOLDOWN_SECONDS="${1#*=}"; shift ;;
+        --gpu-memory-utilization) GPU_MEMORY_UTILIZATION="$2"; shift 2 ;;
+        --gpu-memory-utilization=*) GPU_MEMORY_UTILIZATION="${1#*=}"; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown argument: $1"; usage ;;
     esac
 done
 
-MODEL_PATH="Qwen/${MODEL_NAME}"
+# Map model names to HuggingFace paths
+get_model_path() {
+    case "$1" in
+        Qwen2.5-3B-Instruct) echo "Qwen/Qwen2.5-3B-Instruct" ;;
+        QwQ-32B) echo "Qwen/QwQ-32B" ;;
+        *) echo "Qwen/$1" ;;
+    esac
+}
 
 if [ "$GPUS_PROVIDED" = false ]; then
     if command -v nvidia-smi >/dev/null 2>&1; then
@@ -176,14 +187,14 @@ get_gpu_label_for_list() {
 
 GPU_MODEL_LABEL=$(get_gpu_model_label)
 GPU_LOG_LABEL="${GPUS_PER_EXP}x${GPU_MODEL_LABEL}"
-LOG_FILE="logs/main_table_${MODEL_NAME}.log"
+LOG_FILE="logs/diff_model_PPO.log"
 RESULT_ROOT="logs"
 
 mkdir -p logs
 mkdir -p "$RESULT_ROOT"
 
-echo "=== Perf Table Runner for ${MODEL_NAME}: $(date) ===" | tee "$LOG_FILE"
-echo "Tasks: ${TASKS[*]} | Steps: ${STEPS} | GPU per exp: ${GPUS_PER_EXP}x${GPU_MODEL_LABEL}" | tee -a "$LOG_FILE"
+echo "=== Model Type Runner (PPO): $(date) ===" | tee "$LOG_FILE"
+echo "Models: ${MODEL_NAMES[*]} | Tasks: ${TASKS[*]} | Steps: ${STEPS} | GPU per exp: ${GPUS_PER_EXP}x${GPU_MODEL_LABEL}" | tee -a "$LOG_FILE"
 echo "GPUS: ${GPUS[*]} | groups: ${GPU_GROUPS[*]} | cooldown=${COOLDOWN_SECONDS}s" | tee -a "$LOG_FILE"
 
 get_config_for_task() {
@@ -197,33 +208,16 @@ get_config_for_task() {
     esac
 }
 
-get_algo_overrides() {
-    case "$1" in
-        PPO)
-            echo "algorithm.adv_estimator=gae actor_rollout_ref.actor.loss_agg_mode=token-mean"
-            ;;
-        DAPO)
-            # DAPO here = PPO + higher clip + no KL + token-level loss.
-            echo "algorithm.adv_estimator=gae actor_rollout_ref.actor.loss_agg_mode=token-mean actor_rollout_ref.actor.clip_ratio_low=0.2 actor_rollout_ref.actor.clip_ratio_high=0.28 actor_rollout_ref.actor.use_kl_loss=False actor_rollout_ref.actor.kl_loss_coef=0.0 algorithm.use_kl_in_reward=False algorithm.kl_ctrl.kl_coef=0.0"
-            ;;
-        GRPO)
-            echo "algorithm.adv_estimator=grpo algorithm.norm_adv_by_std_in_grpo=True actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean"
-            ;;
-        DrGRPO)
-            echo "algorithm.adv_estimator=grpo algorithm.norm_adv_by_std_in_grpo=False actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum"
-            ;;
-        *)
-            echo ""
-            ;;
-    esac
-}
-
 run_experiment() {
     local task=$1
-    local algo=$2
+    local model_name=$2
     local filter=$3
     local config=$4
     local gpu_list=$5
+
+    local model_path
+    model_path=$(get_model_path "$model_name")
+    local algo="PPO"
 
     local filter_value
     if [ "$filter" = "filter" ]; then
@@ -238,15 +232,15 @@ run_experiment() {
         "actor_rollout_ref.actor.kl_loss_coef=0.001"
         "actor_rollout_ref.actor.entropy_coeff=0.001"
         "actor_rollout_ref.actor.filter_loss_scaling=sqrt"
-        "actor_rollout_ref.rollout.gpu_memory_utilization=0.3"
+        "actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEMORY_UTILIZATION}"
     )
 
-    local algo_overrides
-    algo_overrides=$(get_algo_overrides "$algo")
+    # PPO algorithm overrides
+    local algo_overrides="algorithm.adv_estimator=gae actor_rollout_ref.actor.loss_agg_mode=token-mean"
     read -r -a algo_args <<< "$algo_overrides"
 
-    local name="${task}-${algo}-${filter}-${MODEL_NAME}"
-    local task_dir="${RESULT_ROOT}/main_table_${task}_${MODEL_NAME}"
+    local name="${task}-${algo}-${filter}-${model_name}"
+    local task_dir="${RESULT_ROOT}/diff_model_${task}"
     local log_path="${task_dir}/${name}.log"
     local gpus_per_exp
     IFS=',' read -r -a gpu_ids <<< "$gpu_list"
@@ -255,8 +249,8 @@ run_experiment() {
     mkdir -p "$task_dir"
     START=$(date +%s)
     CUDA_VISIBLE_DEVICES="${gpu_list}" python train.py --config-name "$config" \
-        model_path="${MODEL_PATH}" \
-        trainer.project_name="ragen_perf_table" \
+        model_path="${model_path}" \
+        trainer.project_name="ragen_model_type" \
         trainer.total_training_steps="${STEPS}" \
         trainer.experiment_name="${name}" \
         trainer.logger="['console','wandb']" \
@@ -273,9 +267,35 @@ run_experiment() {
     END=$(date +%s)
 
     TOTAL_TIME=$((END - START))
-    TRAIN_TIME_RAW=$(grep -oP 'timing_s/train_total[:\\s]+\\K[\\d.]+' "$log_path" | tail -1 || echo "")
-    EVAL_TIME_RAW=$(grep -oP 'timing_s/eval_total[:\\s]+\\K[\\d.]+' "$log_path" | tail -1 || echo "")
-    TOTAL_TIME_RAW=$(grep -oP 'timing_s/total[:\\s]+\\K[\\d.]+' "$log_path" | tail -1 || echo "")
+    timing_values=()
+    mapfile -t timing_values < <(
+        python - "$log_path" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+def last(pattern, text):
+    matches = re.findall(pattern, text)
+    return matches[-1] if matches else ""
+
+try:
+    text = Path(sys.argv[1]).read_text(errors="ignore")
+except Exception:
+    text = ""
+
+patterns = [
+    r"timing_s/train_total[:\s]+([\d.]+)",
+    r"timing_s/eval_total[:\s]+([\d.]+)",
+    r"timing_s/total[:\s]+([\d.]+)",
+]
+
+for pattern in patterns:
+    print(last(pattern, text))
+PY
+    )
+    TRAIN_TIME_RAW="${timing_values[0]:-}"
+    EVAL_TIME_RAW="${timing_values[1]:-}"
+    TOTAL_TIME_RAW="${timing_values[2]:-}"
     TRAIN_TIME=$([ -n "$TRAIN_TIME_RAW" ] && printf "%.2f" "$TRAIN_TIME_RAW" || echo "N/A")
     EVAL_TIME=$([ -n "$EVAL_TIME_RAW" ] && printf "%.2f" "$EVAL_TIME_RAW" || echo "N/A")
     TOTAL_TIME_METRIC=$([ -n "$TOTAL_TIME_RAW" ] && printf "%.2f" "$TOTAL_TIME_RAW" || echo "N/A")
@@ -289,10 +309,13 @@ run_experiment() {
 
     local gpu_label
     gpu_label=$(get_gpu_label_for_list "$gpu_list")
-    local summary_line="task=${task} | algo=${algo} | filter=${filter} | model=${MODEL_NAME} | steps=${STEPS} | filter=${filter_strategy}:${filter_value} | train_time=${TRAIN_TIME}s | eval_time=${EVAL_TIME}s | total_time=${TOTAL_TIME_METRIC}s | wall_time=${TOTAL_TIME}s | gpu=${gpu_label} | status=${status}"
+    local summary_line="task=${task} | algo=${algo} | filter=${filter} | model=${model_name} | steps=${STEPS} | filter=${filter_strategy}:${filter_value} | train_time=${TRAIN_TIME}s | eval_time=${EVAL_TIME}s | total_time=${TOTAL_TIME_METRIC}s | wall_time=${TOTAL_TIME}s | gpu=${gpu_label} | status=${status}"
     echo "${summary_line}" > "${task_dir}/${name}.result"
     echo "${summary_line}" | tee -a "$LOG_FILE"
-    [ "$status" = "fail" ] && echo "  error: ${error_line}" | tee -a "$LOG_FILE"
+    if [ "$status" = "fail" ]; then
+        echo "  error: ${error_line}" | tee -a "$LOG_FILE"
+    fi
+    return 0
 }
 
 EXPERIMENTS=()
@@ -306,17 +329,16 @@ set_group() {
 
 add_experiment() {
     local task=$1
-    local algo=$2
+    local model_name=$2
     local filter=$3
     local config=$4
-    EXPERIMENTS+=("${CURRENT_GROUP}|${task}|${algo}|${filter}|${config}")
+    EXPERIMENTS+=("${CURRENT_GROUP}|${task}|${model_name}|${filter}|${config}")
 }
 
-ALGORITHMS=("PPO" "DAPO" "GRPO" "DrGRPO")
 FILTERS=("filter" "nofilter")
 
-for algo in "${ALGORITHMS[@]}"; do
-    set_group "Algorithm: ${algo}"
+for model_name in "${MODEL_NAMES[@]}"; do
+    set_group "Model: ${model_name}"
     for task in "${TASKS[@]}"; do
         config=$(get_config_for_task "$task")
         if [ -z "$config" ]; then
@@ -324,37 +346,93 @@ for algo in "${ALGORITHMS[@]}"; do
             exit 1
         fi
         for filter in "${FILTERS[@]}"; do
-            add_experiment "$task" "$algo" "$filter" "$config"
+            add_experiment "$task" "$model_name" "$filter" "$config"
         done
     done
 done
 
+QUEUE_FILE=$(mktemp -t ragen_model_type_queue.XXXXXX)
+QUEUE_LOCK="${QUEUE_FILE}.lock"
+echo 0 > "$QUEUE_FILE"
+USE_FLOCK=false
+QUEUE_LOCK_DIR="${QUEUE_LOCK}.d"
+MAIN_PID=$$
+
+cleanup_queue() {
+    if [ "$$" -ne "$MAIN_PID" ]; then
+        return
+    fi
+    rm -f "$QUEUE_FILE" "$QUEUE_LOCK"
+    rmdir "$QUEUE_LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup_queue EXIT
+
+if command -v flock >/dev/null 2>&1; then
+    USE_FLOCK=true
+fi
+
+next_experiment_index() {
+    local idx
+    if [ "$USE_FLOCK" = true ]; then
+        flock -x "$QUEUE_LOCK_FD"
+        idx=$(cat "$QUEUE_FILE")
+        if [ -z "$idx" ]; then
+            idx=0
+        fi
+        if (( idx >= ${#EXPERIMENTS[@]} )); then
+            flock -u "$QUEUE_LOCK_FD"
+            echo -1
+            return
+        fi
+        echo $((idx + 1)) > "$QUEUE_FILE"
+        flock -u "$QUEUE_LOCK_FD"
+        echo "$idx"
+        return
+    fi
+
+    while ! mkdir "$QUEUE_LOCK_DIR" 2>/dev/null; do
+        sleep 0.05
+    done
+    idx=$(cat "$QUEUE_FILE")
+    if [ -z "$idx" ]; then
+        idx=0
+    fi
+    if (( idx >= ${#EXPERIMENTS[@]} )); then
+        rmdir "$QUEUE_LOCK_DIR"
+        echo -1
+        return
+    fi
+    echo $((idx + 1)) > "$QUEUE_FILE"
+    rmdir "$QUEUE_LOCK_DIR"
+    echo "$idx"
+}
+
 run_queue_for_slot() {
     local gpu_list=$1
-    local slot=$2
-    local -a indices=()
-    local i
-    for i in "${!EXPERIMENTS[@]}"; do
-        if (( i % NUM_SLOTS == slot )); then
-            indices+=("$i")
+    if [ "$USE_FLOCK" = true ]; then
+        exec {QUEUE_LOCK_FD}>"$QUEUE_LOCK"
+    fi
+    while true; do
+        local idx
+        idx=$(next_experiment_index)
+        if [ "$idx" -lt 0 ]; then
+            break
         fi
-    done
-
-    local total=${#indices[@]}
-    local j
-    for ((j=0; j<total; j++)); do
-        local exp="${EXPERIMENTS[${indices[$j]}]}"
-        IFS='|' read -r exp_group task algo filter config <<< "$exp"
-        run_experiment "$task" "$algo" "$filter" "$config" "$gpu_list"
-        if (( j + 1 < total )); then
+        local exp="${EXPERIMENTS[$idx]}"
+        IFS='|' read -r exp_group task model_name filter config <<< "$exp"
+        run_experiment "$task" "$model_name" "$filter" "$config" "$gpu_list" || true
+        if [ "$COOLDOWN_SECONDS" -gt 0 ]; then
             sleep "$COOLDOWN_SECONDS"
         fi
     done
+    if [ "$USE_FLOCK" = true ]; then
+        exec {QUEUE_LOCK_FD}>&-
+    fi
 }
 
 pids=()
 for idx in "${!GPU_GROUPS[@]}"; do
-    run_queue_for_slot "${GPU_GROUPS[$idx]}" "$idx" &
+    run_queue_for_slot "${GPU_GROUPS[$idx]}" &
     pids+=("$!")
 done
 
@@ -365,20 +443,20 @@ done
 {
     echo ""
     echo "=== Grouped Summary ==="
-echo "GPU per exp: ${GPUS_PER_EXP}x${GPU_MODEL_LABEL} | Model: ${MODEL_NAME} | Steps: ${STEPS}"
+    echo "GPU per exp: ${GPUS_PER_EXP}x${GPU_MODEL_LABEL} | Algorithm: PPO | Steps: ${STEPS}"
     for group_label in "${GROUP_LABELS[@]}"; do
         echo "=== ${group_label} ==="
         for exp in "${EXPERIMENTS[@]}"; do
-            IFS='|' read -r exp_group task algo filter config <<< "$exp"
+            IFS='|' read -r exp_group task model_name filter config <<< "$exp"
             if [ "$exp_group" != "$group_label" ]; then
                 continue
             fi
-            name="${task}-${algo}-${filter}-${MODEL_NAME}"
-            task_dir="${RESULT_ROOT}/main_table_${task}_${MODEL_NAME}"
+            name="${task}-PPO-${filter}-${model_name}"
+            task_dir="${RESULT_ROOT}/diff_model_${task}"
             if [ -f "${task_dir}/${name}.result" ]; then
                 cat "${task_dir}/${name}.result"
             else
-                echo "task=${task} | algo=${algo} | filter=${filter} | model=${MODEL_NAME} | status=missing"
+                echo "task=${task} | algo=PPO | filter=${filter} | model=${model_name} | status=missing"
             fi
         done
     done
