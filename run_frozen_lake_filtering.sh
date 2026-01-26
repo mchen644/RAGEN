@@ -37,8 +37,21 @@ done
 # -----------------------
 # Experiment Parameters
 # -----------------------
-SUCCESS_RATES=("0.01" "0.02" "0.05" "0.1" "0.2" "0.3" "0.5" "1.0")
-FILTER_MODES=("filter" "no_filter") # filter: top_p 0.9, no_filter: top_p 1.0
+SUCCESS_RATES=(
+    "0.01" # 1%
+    "0.02" # 2%
+    "0.05" # 5%
+    "0.1"  # 10%
+    "0.2"  # 20%
+    "0.3"  # 30%
+    "0.5"  # 50%
+    "1.0"  # 100%
+)
+
+FILTER_MODES=(
+    "filter"    # top_p 0.9
+    "no_filter" # top_p 1.0
+)
 
 # -----------------------
 # Setup
