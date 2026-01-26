@@ -250,7 +250,7 @@ run_experiment() {
     START=$(date +%s)
     CUDA_VISIBLE_DEVICES="${gpu_list}" python train.py --config-name "$config" \
         model_path="${model_path}" \
-        trainer.project_name="ragen_model_type" \
+        trainer.project_name="ragen_main_table_diff_model" \
         trainer.total_training_steps="${STEPS}" \
         trainer.experiment_name="${name}" \
         trainer.logger="['console','wandb']" \
