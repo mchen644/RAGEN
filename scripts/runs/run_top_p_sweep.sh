@@ -246,7 +246,7 @@ run_experiment() {
         actor_rollout_ref.actor.use_kl_loss=True \
         actor_rollout_ref.actor.kl_loss_coef=0.001 \
         actor_rollout_ref.actor.entropy_coeff=0.001 \
-        actor_rollout_ref.actor.filter_loss_scaling=sqrt \
+        actor_rollout_ref.actor.filter_loss_scaling=none \
         actor_rollout_ref.actor.ppo_mini_batch_size=64 \
         critic.ppo_mini_batch_size=64 \
         ppo_mini_batch_size=64 \

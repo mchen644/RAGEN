@@ -244,7 +244,7 @@ run_experiment() {
         "actor_rollout_ref.actor.kl_loss_type=low-var-kl"
         "actor_rollout_ref.actor.kl_loss_coef=0.001"
         "actor_rollout_ref.actor.entropy_coeff=0.001"
-        "actor_rollout_ref.actor.filter_loss_scaling=sqrt"
+        "actor_rollout_ref.actor.filter_loss_scaling=none"
         "actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEMORY_UTILIZATION}"
     )
 
