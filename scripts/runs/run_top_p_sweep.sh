@@ -258,7 +258,7 @@ run_experiment() {
         actor_rollout_ref.rollout.rollout_filter_metric=reward_variance \
         es_manager.train.env_groups=8 \
         es_manager.train.group_size=16 \
-        es_manager.train.env_configs.n_groups='[16]' \
+        es_manager.train.env_configs.n_groups='[8]' \
         es_manager.val.env_groups=512 \
         es_manager.val.group_size=1 \
         es_manager.val.env_configs.n_groups='[512]' \
