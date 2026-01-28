@@ -8,7 +8,7 @@ set -euo pipefail
 # Defaults
 STEPS=400
 MODEL_NAMES=("Qwen2.5-3B-Instruct")
-TASKS=("sokoban" "frozenlake" "webshop" "metamathqa" "countdown")
+TASKS=("sokoban" "frozenlake" "metamathqa" "countdown")
 SAVE_FREQ=-1
 FILTER_MODES=("filter" "nofilter")
 FILTERS_OPTION="all"
@@ -27,7 +27,7 @@ usage() {
     echo "Options:"
     echo "  --steps N             Training steps (default: 400)"
     echo "  --tasks LIST          Comma-separated tasks (default: sokoban,frozenlake,webshop,metamathqa,countdown)"
-    echo "  --models LIST         Comma-separated model names (default: Qwen2.5-3B-Instruct,QwQ-32B)"
+    echo "  --models LIST         Comma-separated model names or HF paths (default: Qwen2.5-3B-Instruct)"
     echo "  --gpus LIST           Comma-separated GPU IDs (default: auto-detect)"
     echo "  --gpus-per-exp N      GPUs per experiment (default: 1)"
     echo "  --cooldown SECONDS    Cooldown between runs on the same GPU group (default: 30)"
@@ -65,6 +65,10 @@ done
 
 # Map model names to HuggingFace paths
 get_model_path() {
+    if [[ "$1" == *"/"* ]]; then
+        echo "$1"
+        return
+    fi
     case "$1" in
         Qwen2.5-3B-Instruct) echo "Qwen/Qwen2.5-3B-Instruct" ;;
         QwQ-32B) echo "Qwen/QwQ-32B" ;;
