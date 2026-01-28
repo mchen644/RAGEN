@@ -252,6 +252,7 @@ run_experiment() {
         trainer.n_gpus_per_node="${gpus_per_exp}" \
         system.CUDA_VISIBLE_DEVICES="'${gpu_list}'" \
         algorithm.adv_estimator=gae \
+        actor_rollout_ref.actor.use_kl_loss=False \
         actor_rollout_ref.actor.kl_loss_coef=0 \
         actor_rollout_ref.actor.entropy_coeff="${value}" \
         actor_rollout_ref.actor.filter_loss_scaling=sqrt \

@@ -226,6 +226,10 @@ run_experiment() {
     local value="$1"
     local gpu_list="$2"
     local safe_label="${value//./}"
+    local use_kl_loss="False"
+    if [ "$value" != "0" ]; then
+        use_kl_loss="True"
+    fi
     safe_label="${safe_label,,}"
 
     local name="sokoban_kl_sweep_${safe_label}-${MODEL_NAME}"
@@ -252,6 +256,7 @@ run_experiment() {
         trainer.n_gpus_per_node="${gpus_per_exp}" \
         system.CUDA_VISIBLE_DEVICES="'${gpu_list}'" \
         algorithm.adv_estimator=gae \
+        actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
         actor_rollout_ref.actor.kl_loss_coef="${value}" \
         actor_rollout_ref.actor.entropy_coeff=0.0 \
         actor_rollout_ref.actor.filter_loss_scaling=sqrt \
