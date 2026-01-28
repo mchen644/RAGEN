@@ -232,8 +232,8 @@ run_experiment() {
     fi
     safe_label="${safe_label,,}"
     local filter_tag="nofilter"
-    if [ "${ROLL_FILTER_INCLUDE_ZERO}" = "True" ]; then
-        filter_tag="top_p_1"
+    if [ "${ROLL_FILTER_INCLUDE_ZERO}" = "False" ]; then
+        filter_tag="filter_zero"
     fi
 
     local name="sokoban_kl_sweep_${filter_tag}_${safe_label}-${MODEL_NAME}"
@@ -438,8 +438,8 @@ done
         safe_label="${value//./}"
         safe_label="${safe_label,,}"
         filter_tag="nofilter"
-        if [ "${ROLL_FILTER_INCLUDE_ZERO}" = "True" ]; then
-            filter_tag="top_p_1"
+        if [ "${ROLL_FILTER_INCLUDE_ZERO}" = "False" ]; then
+            filter_tag="filter_zero"
         fi
         name="sokoban_kl_sweep_${filter_tag}_${safe_label}-${MODEL_NAME}"
         task_dir="${RESULT_ROOT}/${filter_tag}/${safe_label}"
