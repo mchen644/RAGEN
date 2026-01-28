@@ -231,9 +231,13 @@ run_experiment() {
         use_kl_loss="True"
     fi
     safe_label="${safe_label,,}"
+    local filter_tag="nofilter"
+    if [ "${ROLL_FILTER_INCLUDE_ZERO}" = "True" ]; then
+        filter_tag="top_p_1"
+    fi
 
-    local name="sokoban_kl_sweep_${safe_label}-${MODEL_NAME}"
-    local task_dir="${RESULT_ROOT}/${safe_label}"
+    local name="sokoban_kl_sweep_${filter_tag}_${safe_label}-${MODEL_NAME}"
+    local task_dir="${RESULT_ROOT}/${filter_tag}/${safe_label}"
     local log_path="${task_dir}/${name}.log"
     local checkpoint_dir="${CHECKPOINT_ROOT}/${safe_label}/${name}"
     local gpus_per_exp
@@ -324,7 +328,7 @@ PY
 
     local gpu_label
     gpu_label=$(get_gpu_label_for_list "$gpu_list")
-    local summary_line="kl=${value} | include_zero=${ROLL_FILTER_INCLUDE_ZERO} | train_time=${TRAIN_TIME}s | eval_time=${EVAL_TIME}s | total_time=${TOTAL_TIME_METRIC}s | wall_time=${TOTAL_TIME}s | gpu=${gpu_label} | status=${status}"
+    local summary_line="kl=${value} | filter=${filter_tag} | include_zero=${ROLL_FILTER_INCLUDE_ZERO} | train_time=${TRAIN_TIME}s | eval_time=${EVAL_TIME}s | total_time=${TOTAL_TIME_METRIC}s | wall_time=${TOTAL_TIME}s | gpu=${gpu_label} | status=${status}"
     echo "${summary_line}" > "${task_dir}/${name}.result"
     echo "${summary_line}" | tee -a "$LOG_FILE"
     if [ "$status" = "fail" ]; then
@@ -431,10 +435,14 @@ done
     echo "=== KL Sweep Summary ==="
     echo "Project: ${PROJECT_NAME} | Steps: ${STEPS} | GPU per exp: ${GPU_LOG_LABEL}"
     for value in "${EXPERIMENTS[@]}"; do
-        safe_label="${value//./p}"
+        safe_label="${value//./}"
         safe_label="${safe_label,,}"
-        name="sokoban_kl_sweep_${safe_label}-${MODEL_NAME}"
-        task_dir="${RESULT_ROOT}/${safe_label}"
+        filter_tag="nofilter"
+        if [ "${ROLL_FILTER_INCLUDE_ZERO}" = "True" ]; then
+            filter_tag="top_p_1"
+        fi
+        name="sokoban_kl_sweep_${filter_tag}_${safe_label}-${MODEL_NAME}"
+        task_dir="${RESULT_ROOT}/${filter_tag}/${safe_label}"
         if [ -f "${task_dir}/${name}.result" ]; then
             cat "${task_dir}/${name}.result"
         else
