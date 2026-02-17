@@ -119,3 +119,6 @@ tests/e2e/toy_examples/deepspeed/synchronous/output.txt
 
 log/
 *.result
+
+# Local W&B credentials for this project only
+scripts/wandb.local.sh
