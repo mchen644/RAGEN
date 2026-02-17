@@ -14,11 +14,12 @@ pandas
 pybind11
 ray>=2.10
 tensordict>=0.8.0,<0.9.0
-transformers
+transformers>=4.50.0,<4.54.0
 vllm==0.8.2
 wandb
 gymnasium
 gymnasium[toy-text]
+setuptools<70.0.0
 
 pyarrow>=15.0.0
 pylatexenc
@@ -28,11 +29,3 @@ debugpy
 together
 anthropic
 faiss-cpu==1.11.0
-
-# This is optional, but needs to be installed with main requirements if you want to use webshop
--r external/webshop-minimal/requirements.txt
-
-# This is optional, but needs to be installed with main requirements if you want to use lean environment
-# Note that we only need the client side sdk so the requirements inside kimina-lean-server itself can be separated
-# as long as there is an available kimina-lean-server running.
-kimina-client

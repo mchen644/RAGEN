@@ -1,4 +1,30 @@
 import gym
+# Ensure pkg_resources is available before importing gym_sokoban
+# Workaround: Try to install pkg_resources as a standalone package if not available
+try:
+    import pkg_resources
+except ImportError:
+    # Try installing pkg_resources standalone package
+    try:
+        import subprocess
+        import sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pkg_resources"], 
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import pkg_resources
+    except Exception:
+        # If that fails, try installing older setuptools temporarily
+        # Note: This may conflict with vllm which requires setuptools>=74.1.1
+        # But gym_sokoban needs pkg_resources which was removed in setuptools>=70.0.0
+        raise ImportError(
+            "pkg_resources module not found. This is required by gym_sokoban.\n"
+            "There's a version conflict: vllm 0.8.2 requires setuptools>=74.1.1, "
+            "but pkg_resources was removed in setuptools>=70.0.0.\n\n"
+            "Try installing setuptools<70.0.0 (may cause vllm warnings but usually still works):\n"
+            "  pip install 'setuptools<70.0.0'\n\n"
+            "Or try installing pkg_resources standalone:\n"
+            "  pip install pkg_resources"
+        )
+
 from gym_sokoban.envs.sokoban_env import SokobanEnv as GymSokobanEnv
 import numpy as np
 from .utils import (

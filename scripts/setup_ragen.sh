@@ -53,7 +53,8 @@ main() {
     eval "$(conda shell.bash hook)"
     conda activate ragen
 
-    pip install -U pip "setuptools<70.0.0" wheel
+    pip install -U pip wheel
+    pip install "setuptools<70.0.0"  # Need older version for pkg_resources (required by gym_sokoban)
     pip install numpy ninja packaging psutil
 
     # Install package in editable mode
@@ -63,14 +64,6 @@ main() {
     cd verl
     pip install -e . --no-dependencies # we put dependencies in requirements.txt
     cd ..
-    
-    # Install package in editable mode
-    print_step "Installing ragen package..."
-    pip install -e .
-
-    # Install spatial environment dependencies
-    print_step "Installing spatial environment dependencies..."
-    pip install -e ragen/env/spatial/Base
     
     # Install PyTorch with CUDA if available
     if check_cuda; then
@@ -107,10 +100,13 @@ main() {
         pip install torch==2.5.0
     fi
     
+    # Install package in editable mode
+    print_step "Installing ragen package..."
+    pip install -e .
+    
     # Install remaining requirements
     print_step "Installing additional requirements..."
     pip install -r requirements.txt
-    pip install transformers==4.48.2
 
     print_step "Downloading data..."
     python scripts/download_data.py
@@ -123,6 +119,7 @@ main() {
 
     # installing webshop
     print_step "Installing webshop dependencies..."
+    conda install -c pytorch faiss-cpu -y
     sudo apt update
     sudo apt install default-jdk -y
     conda install -c conda-forge openjdk=21 maven -y
@@ -136,12 +133,13 @@ main() {
     python -m spacy download en_core_web_sm
     python -m spacy download en_core_web_lg
 
+
     print_step "Downloading data..."
     python scripts/download_data.py
 
     # Optional: download full data set
     print_step "Downloading full data set..."
-    conda install conda-forge::gdown -y
+    conda install conda-forge::gdown
     mkdir -p external/webshop-minimal/webshop_minimal/data/full
     cd external/webshop-minimal/webshop_minimal/data/full
     gdown https://drive.google.com/uc?id=1A2whVgOO0euk5O13n2iYDM0bQRkkRduB # items_shuffle
